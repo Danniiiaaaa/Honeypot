@@ -412,7 +412,7 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks)
     if session["is_scam"] and (new_intel or session["turns"] % 5 == 0):
         background_tasks.add_task(dispatch_report, sid, session)
 
-    return {"status": "success", "reply": reply}
+    return {"status": "success", "response": reply}
 
 @app.get("/")
 def index():
@@ -421,4 +421,5 @@ def index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
