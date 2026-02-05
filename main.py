@@ -20,7 +20,7 @@ def configure_ai():
     global ai_model
     # Check if key is the placeholder or empty
     if "YOUR_GEMINI_API_KEY" in GEMINI_KEY or not GEMINI_KEY:
-        print("⚠️ WARNING: GEMINI_KEY is missing. AI features will be DISABLED.")
+        print("[WARNING] GEMINI_KEY is missing. AI features will be DISABLED.")
         return
 
     try:
@@ -35,20 +35,20 @@ def configure_ai():
         
         for model_name in candidates:
             try:
-                print(f" Testing connection to: {model_name}...")
+                print(f"[INFO] Testing connection to: {model_name}...")
                 test_model = genai.GenerativeModel(model_name)
                 
                 # CRITICAL: Generate content to prove quota/access works
                 test_model.generate_content("Test connection")
                 
                 ai_model = test_model
-                print(f" SUCCESS! AI Configured using model: {model_name}")
+                print(f"[SUCCESS] AI Configured using model: {model_name}")
                 return
             except Exception as e:
-                print(f" {model_name} failed: {e}")
+                print(f"[FAILED] {model_name} failed: {e}")
 
         # 2. Safe Fallback Logic
-        print("\n KNOWN MODELS FAILED. Searching for safe fallback...")
+        print("\n[WARNING] KNOWN MODELS FAILED. Searching for safe fallback...")
         try:
             for m in genai.list_models():
                 if 'generateContent' in m.supported_generation_methods:
@@ -57,7 +57,7 @@ def configure_ai():
                         continue
                         
                     ai_model = genai.GenerativeModel(m.name)
-                    print(f" Forcing connection to safe fallback: {m.name}")
+                    print(f"[WARNING] Forcing connection to safe fallback: {m.name}")
                     return
         except Exception:
             pass
@@ -68,10 +68,10 @@ def configure_ai():
 # === LIFESPAN MANAGER ===
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🚀 Server starting... Initializing AI Brain...")
+    print("[START] Server starting... Initializing AI Brain...")
     configure_ai()
     yield
-    print("🛑 Server shutting down...")
+    print("[STOP] Server shutting down...")
 
 # Data Models
 class Message(BaseModel):
@@ -162,7 +162,7 @@ def is_suspicious(text: str) -> bool:
 def generate_persona_reply(user_input: str, history: List[Message]) -> str:
     # Safe check
     if ai_model is None:
-        print(" CRITICAL: AI model is None during reply generation.")
+        print("[CRITICAL] AI model is None during reply generation.")
         return "Beta, my signal is very bad. I cannot hear you."
 
     try:
@@ -178,9 +178,10 @@ def generate_persona_reply(user_input: str, history: List[Message]) -> str:
         3. Feign confusion.
         4. Bait the scammer by asking for their details.
         5. Keep it brief (<30 words).
-        6. Use varied terms of address (like Beta, Sir, or just 'you'), do not repeat 'Beta'.
+        6. Use varied terms of address (like Beta, Sir, or just 'you'), do not repeat 'Beta' in every sentence.
         7. React specifically to the latest threat (e.g., if they say "5 minutes", mention the time).
-        8. Do not repeat the same sentence twice. Try to vary your confusion.
+        8. CRITICAL: Do NOT repeat the same phrase like "Oh my dear" multiple times.
+        9. VARY YOUR EXCUSES: Rotate between "lost glasses", "low battery", "internet is slow", "calling my grandson", or "cannot find the button".
         
         History:
         {past_context}
@@ -195,7 +196,7 @@ def generate_persona_reply(user_input: str, history: List[Message]) -> str:
         return result.text.strip()
     except Exception as e:
         # LOG the error for you (the developer) to see in Render logs
-        print(f" AI GENERATION CRASHED: {str(e)}")
+        print(f"[ERROR] AI GENERATION CRASHED: {str(e)}")
         # RETURN a safe response to the user/tester so they don't see the crash
         return "Beta, the internet is not working properly. Can you repeat?"
 
@@ -265,3 +266,4 @@ def index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
