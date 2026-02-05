@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import asyncio
 import requests
 import uvicorn
 import random
@@ -44,8 +45,11 @@ def configure_ai():
         
         for model_name in candidates:
             try:
-                ai_model = genai.GenerativeModel(model_name)
-                print(f"[SUCCESS] AI Initialized using model: {model_name}")
+                # We use the synchronous generate_content here, and we know it works.
+                test_model = genai.GenerativeModel(model_name)
+                test_model.generate_content("Test connection")
+                ai_model = test_model
+                print(f"[SUCCESS] AI Configured using model: {model_name}")
                 return
             except Exception as e:
                 print(f"[FAILED] {model_name} initialization failed: {e}")
@@ -301,7 +305,8 @@ async def generate_persona_reply(user_input: str, history: List[Message]) -> str
             
             config = genai.GenerationConfig(temperature=1.0)
             
-            response = await ai_model.generate_content_async(prompt, generation_config=config)
+            # FIXED: Using Synchronous call in a Thread to solve 404/Async bugs
+            response = await asyncio.to_thread(ai_model.generate_content, prompt, generation_config=config)
             reply_text = response.text.strip()
 
             if reply_text.lower() == last_bot_msg.lower() or len(reply_text) < 5:
@@ -314,10 +319,11 @@ async def generate_persona_reply(user_input: str, history: List[Message]) -> str
             if any(err in str(e) for err in ["429", "403", "404"]):
                 print(f"[WARNING] API Error ({e}). Attempting Key Rotation...")
                 if rotate_key():
-                    continue
+                    continue 
                 else:
+                    # If we only have 1 key and it fails, wait and retry once
                     print(f"[WARNING] Rotation failed (only 1 key). Retrying in 2s...")
-                    time.sleep(2)
+                    await asyncio.sleep(2)
                     continue
             else:
                 print(f"[ERROR] AI GENERATION CRASHED: {str(e)}")
@@ -367,6 +373,11 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks,
         for kw in matched_keywords:
             if kw not in session["extractedIntelligence"]["suspiciousKeywords"]:
                 session["extractedIntelligence"]["suspiciousKeywords"].append(kw)
+
+    if not session["is_scam"]:
+        if detect_scam_via_llm(msg_text):
+            session["is_scam"] = True
+            session["extractedIntelligence"]["suspiciousKeywords"].append("AI_DETECTED_SUSPICIOUS_CONTENT")
 
     new_intel = scan_for_intel(msg_text, session)
     
