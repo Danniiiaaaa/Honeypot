@@ -20,43 +20,44 @@ def configure_ai():
     global ai_model
     # Check if key is the placeholder or empty
     if "YOUR_GEMINI_API_KEY" in GEMINI_KEY or not GEMINI_KEY:
-        print("⚠️ WARNING: GEMINI_KEY is missing. AI features will be DISABLED.")
+        print(" WARNING: GEMINI_KEY is missing. AI features will be DISABLED.")
         return
 
     try:
         genai.configure(api_key=GEMINI_KEY)
         
-        # We put 1.5-flash FIRST now, as it is the most stable Free Tier model.
+        # 1. Try Specific Stable Models First
         candidates = [
-            "gemini-1.5-flash", 
-            "gemini-2.0-flash",
-            "gemini-2.5-flash",
-            "gemini-pro", 
-            "models/gemini-1.5-flash" 
+            "gemini-1.5-flash", # Best for Free Tier (15 RPM)
+            "gemini-1.5-pro",
+            "gemini-pro"
         ]
         
         for model_name in candidates:
             try:
-                print(f"🔄 Testing connection to: {model_name}...")
+                print(f" Testing connection to: {model_name}...")
                 test_model = genai.GenerativeModel(model_name)
                 
-                # CRITICAL FIX: We MUST generate content to prove quota exists
+                # CRITICAL: Generate content to prove quota/access works
                 test_model.generate_content("Test connection")
                 
-                # If we get here, it worked!
                 ai_model = test_model
-                print(f"✅ SUCCESS! AI Configured using model: {model_name}")
+                print(f" SUCCESS! AI Configured using model: {model_name}")
                 return
             except Exception as e:
-                print(f"❌ {model_name} failed: {e}")
+                print(f" {model_name} failed: {e}")
 
-        print("\n⚠️ ALL KNOWN MODELS FAILED. Using fallback...")
+        # 2. Safe Fallback Logic
+        print("\n KNOWN MODELS FAILED. Searching for safe fallback...")
         try:
-            # Last resort: grab the first available model from list_models
             for m in genai.list_models():
                 if 'generateContent' in m.supported_generation_methods:
+                    # CRITICAL FIX: Skip experimental models with low quotas (limit: 5)
+                    if any(x in m.name for x in ['2.0', '2.5', 'exp', 'vision']):
+                        continue
+                        
                     ai_model = genai.GenerativeModel(m.name)
-                    print(f"⚠️ Forcing connection to fallback: {m.name}")
+                    print(f" Forcing connection to safe fallback: {m.name}")
                     return
         except Exception:
             pass
@@ -67,10 +68,10 @@ def configure_ai():
 # === LIFESPAN MANAGER ===
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🚀 Server starting... Initializing AI Brain...")
+    print(" Server starting... Initializing AI Brain...")
     configure_ai()
     yield
-    print("🛑 Server shutting down...")
+    print(" Server shutting down...")
 
 # Data Models
 class Message(BaseModel):
@@ -159,8 +160,10 @@ def is_suspicious(text: str) -> bool:
     return False
 
 def generate_persona_reply(user_input: str, history: List[Message]) -> str:
+    # Safe check
     if ai_model is None:
-        return "CRITICAL ERROR: AI Model failed to initialize. Check Render logs."
+        print(" CRITICAL: AI model is None during reply generation.")
+        return "Beta, my signal is very bad. I cannot hear you."
 
     try:
         past_context = "\n".join([f"{m.sender}: {m.text}" for m in history[-3:]])
@@ -182,7 +185,10 @@ def generate_persona_reply(user_input: str, history: List[Message]) -> str:
         result = ai_model.generate_content(prompt)
         return result.text.strip()
     except Exception as e:
-        return f"AI CRASHED: {str(e)}"
+        # LOG the error for you (the developer) to see in Render logs
+        print(f" AI GENERATION CRASHED: {str(e)}")
+        # RETURN a safe response to the user/tester so they don't see the crash
+        return "Beta, the internet is not working properly. Can you repeat?"
 
 def dispatch_report(session_id: str, data: Dict):
     if not data["is_scam"]: return
@@ -250,8 +256,3 @@ def index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
-
-
-
-
