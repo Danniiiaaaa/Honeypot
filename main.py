@@ -6,6 +6,7 @@ import google.generativeai as genai
 from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+from contextlib import asynccontextmanager 
 
 # Configuration
 GEMINI_KEY = os.environ.get("GEMINI_KEY")
@@ -293,5 +294,6 @@ def index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
