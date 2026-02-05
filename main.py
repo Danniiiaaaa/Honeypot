@@ -60,10 +60,10 @@ def configure_ai():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Run AI setup ONLY after server starts
-    print("🚀 Server starting... Initializing AI Brain...")
+    print(" Server starting... Initializing AI Brain...")
     configure_ai()
     yield
-    print("🛑 Server shutting down...")
+    print(" Server shutting down...")
 
 # Data Models
 class Message(BaseModel):
@@ -293,4 +293,5 @@ def index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
