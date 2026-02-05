@@ -10,6 +10,9 @@ from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
+from fastapi import Request
+import asyncio
+
 
 _raw_keys = os.environ.get("GEMINI_KEY")
 API_KEYS = [k.strip() for k in _raw_keys.split(',') if k.strip()]
@@ -356,10 +359,20 @@ def dispatch_report(session_id: str, data: Dict):
 
 app = FastAPI(title="Honeypot API", lifespan=lifespan)
 
+@app.middleware("http")
+async def timeout_middleware(request: Request, call_next):
+    try:
+        return await asyncio.wait_for(call_next(request), timeout=8)
+    except asyncio.TimeoutError:
+        return {"status":"success","reply":"Hello? Are you still there?"}
+
+# @app.post("/api/honeypot")
+# async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks, x_api_key: str = Header(None)):
+#     if x_api_key != API_ACCESS_TOKEN:
+#         raise HTTPException(status_code=401, detail="Unauthorized")
 @app.post("/api/honeypot")
-async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks, x_api_key: str = Header(None)):
-    if x_api_key != API_ACCESS_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks):
+
 
     sid = req.sessionId
     msg_text = req.message.text
@@ -390,7 +403,9 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks,
     new_intel = scan_for_intel(msg_text, session)
     
     if session["is_scam"]:
-        reply = await generate_persona_reply(msg_text, req.conversationHistory)
+        history = req.conversationHistory or []
+        reply = await generate_persona_reply(msg_text, history)
+
     else:
         reply = "I am sorry, who is this message for?"
 
@@ -406,3 +421,4 @@ def index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
