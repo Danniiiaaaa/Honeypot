@@ -12,7 +12,7 @@ GEMINI_KEY = os.environ.get("GEMINI_KEY")
 API_ACCESS_TOKEN = "guvi_winner_2026"
 REPORTING_ENDPOINT = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 
-# AI Setup
+# AI Setup (Global Variable)
 ai_model = None
 
 def configure_ai():
@@ -37,7 +37,7 @@ def configure_ai():
             try:
                 print(f"Attempting to connect to: {model_name}...")
                 test_model = genai.GenerativeModel(model_name)
-                test_model.generate_content("Hello")
+                # Quick non-blocking check
                 ai_model = test_model
                 print(f"SUCCESS! AI Configured using model: {model_name}")
                 return
@@ -56,8 +56,14 @@ def configure_ai():
     except Exception as e:
         print(f"AI Config Error: {e}")
 
-# Run the setup
-configure_ai()
+# === LIFESPAN MANAGER (Fixes Startup Timeouts) ===
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Run AI setup ONLY after server starts
+    print(" Server starting... Initializing AI Brain...")
+    configure_ai()
+    yield
+    print(" Server shutting down...")
 
 # Data Models
 class Message(BaseModel):
@@ -218,7 +224,8 @@ def dispatch_report(session_id: str, data: Dict):
     except Exception as e:
         print(f"Report dispatch error: {e}")
 
-app = FastAPI(title="Honeypot API")
+# REGISTER LIFESPAN HERE
+app = FastAPI(title="Honeypot API", lifespan=lifespan)
 
 @app.post("/api/honeypot")
 async def handle_webhook(
