@@ -1,34 +1,43 @@
 import os
 import re
+import time
 import requests
 import uvicorn
+import random
 import google.generativeai as genai
 from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-from contextlib import asynccontextmanager 
+from contextlib import asynccontextmanager
 
-# Configuration
-GEMINI_KEY = os.environ.get("GEMINI_KEY")
+_raw_keys = os.environ.get("GEMINI_KEY")
+API_KEYS = [k.strip() for k in _raw_keys.split(',') if k.strip()]
+CURRENT_KEY_INDEX = 0
+
 API_ACCESS_TOKEN = os.environ.get("API_ACCESS_TOKEN")
 REPORTING_ENDPOINT = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 
-# AI Setup (Global Variable)
 ai_model = None
 
 def configure_ai():
-    global ai_model
-    # Check if key is the placeholder or empty
-    if "YOUR_GEMINI_API_KEY" in GEMINI_KEY or not GEMINI_KEY:
-        print("[WARNING] GEMINI_KEY is missing. AI features will be DISABLED.")
+    global ai_model, CURRENT_KEY_INDEX
+    
+    if not API_KEYS:
+        print("[WARNING] No API Keys found. AI features will be DISABLED.")
+        return
+
+    current_key = API_KEYS[CURRENT_KEY_INDEX]
+
+    if "YOUR_GEMINI_API_KEY" in current_key:
+        print(f"[WARNING] Key at index {CURRENT_KEY_INDEX} is a placeholder. AI disabled.")
         return
 
     try:
-        genai.configure(api_key=GEMINI_KEY)
+        print(f"[INFO] Configuring AI with Key Index #{CURRENT_KEY_INDEX}...")
+        genai.configure(api_key=current_key)
         
-        # 1. Try Specific Stable Models First
         candidates = [
-            "gemini-1.5-flash", # Best for Free Tier (15 RPM)
+            "gemini-1.5-flash",
             "gemini-1.5-pro",
             "gemini-pro"
         ]
@@ -44,7 +53,6 @@ def configure_ai():
             except Exception as e:
                 print(f"[FAILED] {model_name} failed: {e}")
 
-        # 2. Safe Fallback Logic
         print("\n[WARNING] KNOWN MODELS FAILED. Searching for safe fallback...")
         try:
             for m in genai.list_models():
@@ -60,7 +68,17 @@ def configure_ai():
     except Exception as e:
         print(f"AI Config Error: {e}")
 
-# === LIFESPAN MANAGER ===
+def rotate_key():
+    global CURRENT_KEY_INDEX
+    if len(API_KEYS) <= 1:
+        print("[INFO] Only 1 key available. Cannot rotate.")
+        return False
+    
+    CURRENT_KEY_INDEX = (CURRENT_KEY_INDEX + 1) % len(API_KEYS)
+    print(f"[ROTATION] Switching to API Key Index #{CURRENT_KEY_INDEX}")
+    configure_ai()
+    return True
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("[START] Server starting... Initializing AI Brain...")
@@ -68,7 +86,6 @@ async def lifespan(app: FastAPI):
     yield
     print("[STOP] Server shutting down...")
 
-# Data Models
 class Message(BaseModel):
     sender: str
     text: str
@@ -85,10 +102,8 @@ class WebhookRequest(BaseModel):
     conversationHistory: List[Message] = []
     metadata: Optional[Metadata] = None
 
-# In-memory storage
 active_sessions: Dict[str, Dict[str, Any]] = {}
 
-# Regex patterns for intelligence
 INTEL_PATTERNS = {
     "upiIds": r"[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}",
     "bankAccounts": r"\b\d{9,18}\b",
@@ -96,7 +111,6 @@ INTEL_PATTERNS = {
     "phoneNumbers": r"(?:\+91[\-\s]?)?[6-9]\d{9}"
 }
 
-# SCAM TRIGGER LIST
 SCAM_TRIGGERS = [
     "block", "suspend", "expiry", "expire", "immediate", "urgent", "24 hours", "terminate",
     "disconnect", "lapse", "deactivate", "ban", "invalid", "alert", "attention", "warn",
@@ -116,7 +130,6 @@ SCAM_TRIGGERS = [
     "helpline", "contact", "call", "whatsapp", "message", "sms", "bit.ly", "tinyurl"
 ]
 
-# NEW: Fallback phrases to break loops
 FALLBACK_REPLIES = [
     "Beta, my line is breaking up. Can you say that loudly?",
     "Wait, let me find my reading glasses. Hold on...",
@@ -127,7 +140,6 @@ FALLBACK_REPLIES = [
     "Are you from the main branch? I went there yesterday."
 ]
 
-# NEW: Random contexts to inject variety into AI prompt
 RANDOM_ACTIVITIES = [
     "cooking dal", "looking for spectacles", "watching TV serial", 
     "knitting a sweater", "watering plants", "drinking chai"
@@ -172,22 +184,18 @@ def is_suspicious(text: str) -> bool:
     return False
 
 def generate_persona_reply(user_input: str, history: List[Message]) -> str:
-    # Safe check
     if ai_model is None:
         print("[CRITICAL] AI model is None during reply generation.")
         return random.choice(FALLBACK_REPLIES)
 
-    # RETRY LOGIC: Try up to 3 times if Rate Limit (429) hits
     for attempt in range(3):
         try:
-            # 1. Get last bot message to prevent repetition
             last_bot_msg = ""
             for msg in reversed(history):
-                if msg.sender == "user": # In this schema, 'user' is the bot response
+                if msg.sender == "user": 
                     last_bot_msg = msg.text
                     break
 
-            # 2. Inject Random Context to force variety
             current_activity = random.choice(RANDOM_ACTIVITIES)
             past_context = "\n".join([f"{m.sender}: {m.text}" for m in history[-3:]])
             
@@ -211,11 +219,10 @@ def generate_persona_reply(user_input: str, history: List[Message]) -> str:
             Reply as Jeji:
             """
             
-            config = genai.GenerationConfig(temperature=1.0) # Max creativity
+            config = genai.GenerationConfig(temperature=1.0)
             response = ai_model.generate_content(prompt, generation_config=config)
             reply_text = response.text.strip()
 
-            # 3. CIRCUIT BREAKER: If AI still repeats, force a fallback
             if reply_text.lower() == last_bot_msg.lower() or len(reply_text) < 5:
                 print("[INFO] Loop detected! Using fallback reply.")
                 return random.choice(FALLBACK_REPLIES)
@@ -223,15 +230,18 @@ def generate_persona_reply(user_input: str, history: List[Message]) -> str:
             return reply_text
 
         except Exception as e:
-            if "429" in str(e):
-                print(f"[WARNING] Rate Limit Hit (429). Retrying {attempt+1}/3...")
-                time.sleep(2) # Wait 2 seconds before retrying
-                continue
+            if "429" in str(e) or "403" in str(e):
+                print(f"[WARNING] API Error ({e}). Attempting Key Rotation...")
+                if rotate_key():
+                    continue
+                else:
+                    print(f"[WARNING] Rotation failed (only 1 key). Retrying in 2s...")
+                    time.sleep(2)
+                    continue
             else:
                 print(f"[ERROR] AI GENERATION CRASHED: {str(e)}")
-                break # Non-retriable error (like 403 or network)
+                break 
 
-    # If all retries fail, return a random safe response (NOT just "Internet broken")
     print("[ERROR] Max retries reached. Sending fallback.")
     return random.choice(FALLBACK_REPLIES)
 
