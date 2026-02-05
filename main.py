@@ -36,7 +36,6 @@ def configure_ai():
         print(f"[INFO] Configuring AI with Key Index #{CURRENT_KEY_INDEX}...")
         genai.configure(api_key=current_key)
         
-        # Priority list of stable models
         candidates = [
             "gemini-1.5-flash",
             "gemini-1.5-pro",
@@ -51,7 +50,6 @@ def configure_ai():
             except Exception as e:
                 print(f"[FAILED] {model_name} initialization failed: {e}")
 
-        # Fallback
         try:
             for m in genai.list_models():
                 if 'generateContent' in m.supported_generation_methods:
@@ -135,12 +133,108 @@ FALLBACK_REPLIES = [
     "Sorry, my grandson is calling on the other line. One minute.",
     "Which bank did you say? SBI or HDFC? I have accounts in both.",
     "My screen is very dark. I cannot see the OTP. How do I make it bright?",
-    "Are you from the main branch? I went there yesterday."
+    "Are you from the main branch? I went there yesterday.",
+    "Hello? Are you still there? I think the signal is lost.",
+    "My battery is showing low red line. Let me find the charger.",
+    "Is this regarding the pension scheme or the savings account?",
+    "I cannot hear you clearly, there is a lot of static.",
+    "Can you call me back on the landline? This mobile is acting up.",
+    "My spectacles are in the other room. Just a moment.",
+    "Why are you asking for this code? Is it safe?",
+    "I typed the number but it says 'Invalid Input'. What to do?",
+    "Wait, the milk is boiling over! Hold on one second.",
+    "I am an old woman, please be patient with me.",
+    "Did you say your name was Rahul or Ramesh?",
+    "I don't have my passbook with me right now.",
+    "Can I go to the ATM and do this? It is near my house.",
+    "Beta, the pressure cooker is whistling, I cannot hear you.",
+    "Is this Mr. Sharma from the LIC office?",
+    "My hands are shaking, I pressed the wrong button I think.",
+    "Hold on, my neighbor Mrs. Gupta is at the door.",
+    "I am trying to find the message but my inbox is full.",
+    "Does this require an internet connection? My wifi is off.",
+    "Please speak slowly, my hearing aid is not working well today.",
+    "Are you calling about the fixed deposit maturity?",
+    "I accidentally deleted the message. Can you send it again?",
+    "My phone is very hot, I think it might explode.",
+    "Do I need to go to the bank for this?",
+    "My son told me not to share numbers with strangers.",
+    "Is this about the electricity bill? I already paid it.",
+    "Wait, I am looking for a pen to write this down.",
+    "The screen is spinning round and round. What does that mean?",
+    "Can you talk to my husband? He handles the money.",
+    "I am in the middle of my evening prayers. Can you wait?",
+    "My phone display is cracked, I cannot read the numbers.",
+    "Are you the same person who called yesterday about the lottery?",
+    "I don't remember my PIN number. Is it written on the card?",
+    "Wait, the cat just jumped on the table!",
+    "Can I do this tomorrow morning? It is very late.",
+    "My phone is running out of balance.",
+    "Is there a charge for this service?",
+    "I think I received a message from the police too.",
+    "Why is the bank calling from a personal number?",
+    "Let me put on my speakerphone.",
+    "I am pressing 'OK' but it goes back to the home screen.",
+    "Do you know my branch manager, Mr. Patel?",
+    "I am confused, which app should I open?",
+    "My grandson usually helps me with this. He is in school.",
+    "The letters are too small. I cannot read them.",
+    "Is this mandatory? Can I opt out?",
+    "My account balance is zero anyway.",
+    "Wait, I am getting another call.",
+    "Can you verify my address first?",
+    "I don't have a debit card, only a passbook.",
+    "Is this about the gold loan?",
+    "My phone fell in water yesterday, the sound is low.",
+    "I am eating lunch. Can you call in 1 hour?",
+    "Did I win something? Is this a prize?",
+    "I am afraid of doing this online. Can I come to the office?",
+    "What is an OTP? Is it the 4 digit number?",
+    "I think I entered the wrong password 3 times.",
+    "The app is asking for an update. Should I click yes?",
+    "My screen says 'Loading'. It is stuck.",
+    "Can you send me a letter by post instead?",
+    "I don't use Google Pay or PhonePe.",
+    "My daughter said this might be a scam.",
+    "Are you really from the bank? You sound young.",
+    "I have to take my medicine now. One second.",
+    "The keypad is not coming up on the screen.",
+    "I am looking for my reading glasses in the drawer.",
+    "Can you repeat the number? I write very slowly.",
+    "Is this the same bank that is near the vegetable market?",
+    "I don't have my chequebook handy.",
+    "Why do you need my date of birth?",
+    "My phone is very old, it doesn't have internet.",
+    "The TV volume is too high, let me lower it.",
+    "I am trying to find the SMS app.",
+    "It says 'Network Error'. What should I do?",
+    "Can you send the message in Hindi or Tamil?",
+    "I am not comfortable sharing this over the phone.",
+    "Let me ask my neighbor to help me.",
+    "I pressed the red button by mistake.",
+    "The phone is slipping from my hand.",
+    "I am making tea, just one minute.",
+    "Can you hold on? The doorbell is ringing.",
+    "I don't understand these English words.",
+    "Is this urgent? I was sleeping.",
+    "My card is expired I think.",
+    "I lost my purse yesterday with the card.",
+    "Can I call you back on the official number?",
+    "Who is this speaking again?",
+    "My memory is very bad these days.",
+    "I am trying to unlock my phone.",
+    "The touch screen is not working properly.",
+    "I am driving, wait.",
+    "Are you the manager?",
+    "I don't have any money to give you.",
+    "Is this a government scheme?",
+    "My phone is about to switch off."
 ]
 
 RANDOM_ACTIVITIES = [
     "cooking dal", "looking for spectacles", "watching TV serial", 
-    "knitting a sweater", "watering plants", "drinking chai"
+    "knitting a sweater", "watering plants", "drinking chai",
+    "folding clothes", "reading newspaper", "praying", "cleaning the fan"
 ]
 
 def scan_for_intel(text: str, session: Dict) -> bool:
@@ -159,7 +253,6 @@ def get_matched_keywords(text: str) -> List[str]:
     return [t for t in SCAM_TRIGGERS if t in text_lower]
 
 def detect_scam_via_llm(text: str) -> bool:
-    # OPTIMIZATION: Disabled to reduce latency.
     return False
 
 def is_suspicious(text: str) -> bool:
@@ -170,13 +263,11 @@ def is_suspicious(text: str) -> bool:
     if has_link or has_phone: return True
     return False
 
-# CHANGED TO ASYNC DEF FOR SPEED
 async def generate_persona_reply(user_input: str, history: List[Message]) -> str:
     if ai_model is None:
         print("[CRITICAL] AI model is None during reply generation.")
         return random.choice(FALLBACK_REPLIES)
 
-    # FAST RETRY: Only 1 retry to avoid timeouts
     for attempt in range(2):
         try:
             last_bot_msg = ""
@@ -210,7 +301,6 @@ async def generate_persona_reply(user_input: str, history: List[Message]) -> str
             
             config = genai.GenerationConfig(temperature=1.0)
             
-            # ASYNC GENERATION FOR SPEED
             response = await ai_model.generate_content_async(prompt, generation_config=config)
             reply_text = response.text.strip()
 
@@ -222,9 +312,13 @@ async def generate_persona_reply(user_input: str, history: List[Message]) -> str
 
         except Exception as e:
             if any(err in str(e) for err in ["429", "403", "404"]):
-                print(f"[WARNING] API Error ({e}). Rotating & Retrying immediately...")
+                print(f"[WARNING] API Error ({e}). Attempting Key Rotation...")
                 if rotate_key():
-                    continue # Retry immediately (NO SLEEP)
+                    continue
+                else:
+                    print(f"[WARNING] Rotation failed (only 1 key). Retrying in 2s...")
+                    time.sleep(2)
+                    continue
             else:
                 print(f"[ERROR] AI GENERATION CRASHED: {str(e)}")
                 break 
@@ -274,12 +368,9 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks,
             if kw not in session["extractedIntelligence"]["suspiciousKeywords"]:
                 session["extractedIntelligence"]["suspiciousKeywords"].append(kw)
 
-    # REMOVED: detect_scam_via_llm call to reduce latency.
-
     new_intel = scan_for_intel(msg_text, session)
     
     if session["is_scam"]:
-        # AWAIT IS REQUIRED NOW
         reply = await generate_persona_reply(msg_text, req.conversationHistory)
     else:
         reply = "I am sorry, who is this message for?"
