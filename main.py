@@ -175,54 +175,65 @@ def generate_persona_reply(user_input: str, history: List[Message]) -> str:
     # Safe check
     if ai_model is None:
         print("[CRITICAL] AI model is None during reply generation.")
-        return "Beta, my signal is very bad. I cannot hear you."
+        return random.choice(FALLBACK_REPLIES)
 
-    try:
-        # 1. Get last bot message to prevent repetition
-        last_bot_msg = ""
-        for msg in reversed(history):
-            if msg.sender == "user": # In this schema, 'user' is the bot response
-                last_bot_msg = msg.text
-                break
+    # RETRY LOGIC: Try up to 3 times if Rate Limit (429) hits
+    for attempt in range(3):
+        try:
+            # 1. Get last bot message to prevent repetition
+            last_bot_msg = ""
+            for msg in reversed(history):
+                if msg.sender == "user": # In this schema, 'user' is the bot response
+                    last_bot_msg = msg.text
+                    break
 
-        # 2. Inject Random Context to force variety
-        current_activity = random.choice(RANDOM_ACTIVITIES)
-        past_context = "\n".join([f"{m.sender}: {m.text}" for m in history[-3:]])
-        
-        prompt = f"""
-        Role: Jeji, a 68-year-old retired Indian grandmother.
-        Current Activity: {current_activity}.
-        Current Context: Scammer said: "{user_input}"
-        
-        Directives:
-        1. Act confused and slow.
-        2. Reply in the SAME LANGUAGE/DIALECT as the user.
-        3. Never admit you know it is a scam.
-        4. Ask for clarification or their details (ID, Name, Branch).
-        5. Keep it brief (<35 words).
-        6. DO NOT REPEAT YOURSELF.
-        7. If you previously said "{last_bot_msg[:20]}...", say something COMPLETELY DIFFERENT now.
-        
-        History:
-        {past_context}
-        
-        Reply as Jeji:
-        """
-        
-        config = genai.GenerationConfig(temperature=1.0) # Max creativity
-        response = ai_model.generate_content(prompt, generation_config=config)
-        reply_text = response.text.strip()
+            # 2. Inject Random Context to force variety
+            current_activity = random.choice(RANDOM_ACTIVITIES)
+            past_context = "\n".join([f"{m.sender}: {m.text}" for m in history[-3:]])
+            
+            prompt = f"""
+            Role: Jeji, a 68-year-old retired Indian grandmother.
+            Current Activity: {current_activity}.
+            Current Context: Scammer said: "{user_input}"
+            
+            Directives:
+            1. Act confused and slow.
+            2. Reply in the SAME LANGUAGE/DIALECT as the user.
+            3. Never admit you know it is a scam.
+            4. Ask for clarification or their details (ID, Name, Branch).
+            5. Keep it brief (<35 words).
+            6. DO NOT REPEAT YOURSELF.
+            7. If you previously said "{last_bot_msg[:20]}...", say something COMPLETELY DIFFERENT now.
+            
+            History:
+            {past_context}
+            
+            Reply as Jeji:
+            """
+            
+            config = genai.GenerationConfig(temperature=1.0) # Max creativity
+            response = ai_model.generate_content(prompt, generation_config=config)
+            reply_text = response.text.strip()
 
-        # 3. CIRCUIT BREAKER: If AI still repeats, force a fallback
-        if reply_text.lower() == last_bot_msg.lower() or len(reply_text) < 5:
-            print("[INFO] Loop detected! Using fallback reply.")
-            return random.choice(FALLBACK_REPLIES)
+            # 3. CIRCUIT BREAKER: If AI still repeats, force a fallback
+            if reply_text.lower() == last_bot_msg.lower() or len(reply_text) < 5:
+                print("[INFO] Loop detected! Using fallback reply.")
+                return random.choice(FALLBACK_REPLIES)
 
-        return reply_text
+            return reply_text
 
-    except Exception as e:
-        print(f"[ERROR] AI GENERATION CRASHED: {str(e)}")
-        return "Beta, the internet is not working properly. Can you repeat?"
+        except Exception as e:
+            if "429" in str(e):
+                print(f"[WARNING] Rate Limit Hit (429). Retrying {attempt+1}/3...")
+                time.sleep(2) # Wait 2 seconds before retrying
+                continue
+            else:
+                print(f"[ERROR] AI GENERATION CRASHED: {str(e)}")
+                break # Non-retriable error (like 403 or network)
+
+    # If all retries fail, return a random safe response (NOT just "Internet broken")
+    print("[ERROR] Max retries reached. Sending fallback.")
+    return random.choice(FALLBACK_REPLIES)
 
 def dispatch_report(session_id: str, data: Dict):
     if not data["is_scam"]: return
