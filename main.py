@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 
 # Configuration
 GEMINI_KEY = os.environ.get("GEMINI_KEY")
-API_ACCESS_TOKEN = "guvi_winner_2026"
+API_ACCESS_TOKEN = os.environ.get("API_ACCESS_TOKEN")
 REPORTING_ENDPOINT = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 
 # AI Setup (Global Variable)
@@ -294,6 +294,7 @@ def index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
