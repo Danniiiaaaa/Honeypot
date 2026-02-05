@@ -413,7 +413,7 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks)
        session["reported"] = True
        background_tasks.add_task(dispatch_report, sid, session)
 
-    return {"status": "success", "response": reply}
+    return {"status": "success", "reply": reply}
 
 @app.get("/")
 def index():
@@ -422,6 +422,7 @@ def index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
