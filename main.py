@@ -20,7 +20,7 @@ def configure_ai():
     global ai_model
     # Check if key is the placeholder or empty
     if "YOUR_GEMINI_API_KEY" in GEMINI_KEY or not GEMINI_KEY:
-        print(" WARNING: GEMINI_KEY is missing. AI features will be DISABLED.")
+        print("⚠️ WARNING: GEMINI_KEY is missing. AI features will be DISABLED.")
         return
 
     try:
@@ -68,10 +68,10 @@ def configure_ai():
 # === LIFESPAN MANAGER ===
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print(" Server starting... Initializing AI Brain...")
+    print("🚀 Server starting... Initializing AI Brain...")
     configure_ai()
     yield
-    print(" Server shutting down...")
+    print("🛑 Server shutting down...")
 
 # Data Models
 class Message(BaseModel):
@@ -171,6 +171,7 @@ def generate_persona_reply(user_input: str, history: List[Message]) -> str:
         Role: Jeji, a 68-year-old retired Indian grandmother.
         Traits: Technologically illiterate, very polite, confused, slow to understand.
         Current Context: Scammer said: "{user_input}"
+        
         Directives:
         1. Reply in the SAME LANGUAGE as the scammer.
         2. Never admit you know it is a scam.
@@ -178,11 +179,19 @@ def generate_persona_reply(user_input: str, history: List[Message]) -> str:
         4. Bait the scammer by asking for their details.
         5. Keep it brief (<30 words).
         6. Use varied terms of address (like Beta, Sir, or just 'you'), do not repeat 'Beta'.
+        7. React specifically to the latest threat (e.g., if they say "5 minutes", mention the time).
+        8. Do not repeat the same sentence twice. Try to vary your confusion.
+        
         History:
         {past_context}
+        
         Reply as Jeji:
         """
-        result = ai_model.generate_content(prompt)
+        
+        # INCREASE CREATIVITY to prevent repetition loops
+        config = genai.GenerationConfig(temperature=0.9)
+        
+        result = ai_model.generate_content(prompt, generation_config=config)
         return result.text.strip()
     except Exception as e:
         # LOG the error for you (the developer) to see in Render logs
