@@ -37,10 +37,7 @@ def configure_ai():
             try:
                 print(f"[INFO] Testing connection to: {model_name}...")
                 test_model = genai.GenerativeModel(model_name)
-                
-                # CRITICAL: Generate content to prove quota/access works
                 test_model.generate_content("Test connection")
-                
                 ai_model = test_model
                 print(f"[SUCCESS] AI Configured using model: {model_name}")
                 return
@@ -52,10 +49,8 @@ def configure_ai():
         try:
             for m in genai.list_models():
                 if 'generateContent' in m.supported_generation_methods:
-                    # CRITICAL FIX: Skip experimental models with low quotas (limit: 5)
                     if any(x in m.name for x in ['2.0', '2.5', 'exp', 'vision']):
                         continue
-                        
                     ai_model = genai.GenerativeModel(m.name)
                     print(f"[WARNING] Forcing connection to safe fallback: {m.name}")
                     return
@@ -121,6 +116,23 @@ SCAM_TRIGGERS = [
     "helpline", "contact", "call", "whatsapp", "message", "sms", "bit.ly", "tinyurl"
 ]
 
+# NEW: Fallback phrases to break loops
+FALLBACK_REPLIES = [
+    "Beta, my line is breaking up. Can you say that loudly?",
+    "Wait, let me find my reading glasses. Hold on...",
+    "I am pressing the button but nothing is happening. Is it the green one?",
+    "Sorry, my grandson is calling on the other line. One minute.",
+    "Which bank did you say? SBI or HDFC? I have accounts in both.",
+    "My screen is very dark. I cannot see the OTP. How do I make it bright?",
+    "Are you from the main branch? I went there yesterday."
+]
+
+# NEW: Random contexts to inject variety into AI prompt
+RANDOM_ACTIVITIES = [
+    "cooking dal", "looking for spectacles", "watching TV serial", 
+    "knitting a sweater", "watering plants", "drinking chai"
+]
+
 def scan_for_intel(text: str, session: Dict) -> bool:
     updated = False
     for category, regex in INTEL_PATTERNS.items():
@@ -166,22 +178,30 @@ def generate_persona_reply(user_input: str, history: List[Message]) -> str:
         return "Beta, my signal is very bad. I cannot hear you."
 
     try:
+        # 1. Get last bot message to prevent repetition
+        last_bot_msg = ""
+        for msg in reversed(history):
+            if msg.sender == "user": # In this schema, 'user' is the bot response
+                last_bot_msg = msg.text
+                break
+
+        # 2. Inject Random Context to force variety
+        current_activity = random.choice(RANDOM_ACTIVITIES)
         past_context = "\n".join([f"{m.sender}: {m.text}" for m in history[-3:]])
+        
         prompt = f"""
         Role: Jeji, a 68-year-old retired Indian grandmother.
-        Traits: Technologically illiterate, very polite, confused, slow to understand.
+        Current Activity: {current_activity}.
         Current Context: Scammer said: "{user_input}"
         
         Directives:
-        1. Reply in the SAME LANGUAGE as the scammer.
-        2. Never admit you know it is a scam.
-        3. Feign confusion.
-        4. Bait the scammer by asking for their details.
-        5. Keep it brief (<30 words).
-        6. Use varied terms of address (like Beta, Sir, or just 'you'), do not repeat 'Beta' in every sentence.
-        7. React specifically to the latest threat (e.g., if they say "5 minutes", mention the time).
-        8. CRITICAL: Do NOT repeat the same phrase like "Oh my dear" multiple times.
-        9. VARY YOUR EXCUSES: Rotate between "lost glasses", "low battery", "internet is slow", "calling my grandson", or "cannot find the button".
+        1. Act confused and slow.
+        2. Reply in the SAME LANGUAGE/DIALECT as the user.
+        3. Never admit you know it is a scam.
+        4. Ask for clarification or their details (ID, Name, Branch).
+        5. Keep it brief (<35 words).
+        6. DO NOT REPEAT YOURSELF.
+        7. If you previously said "{last_bot_msg[:20]}...", say something COMPLETELY DIFFERENT now.
         
         History:
         {past_context}
@@ -189,15 +209,19 @@ def generate_persona_reply(user_input: str, history: List[Message]) -> str:
         Reply as Jeji:
         """
         
-        # INCREASE CREATIVITY to prevent repetition loops
-        config = genai.GenerationConfig(temperature=0.9)
-        
-        result = ai_model.generate_content(prompt, generation_config=config)
-        return result.text.strip()
+        config = genai.GenerationConfig(temperature=1.0) # Max creativity
+        response = ai_model.generate_content(prompt, generation_config=config)
+        reply_text = response.text.strip()
+
+        # 3. CIRCUIT BREAKER: If AI still repeats, force a fallback
+        if reply_text.lower() == last_bot_msg.lower() or len(reply_text) < 5:
+            print("[INFO] Loop detected! Using fallback reply.")
+            return random.choice(FALLBACK_REPLIES)
+
+        return reply_text
+
     except Exception as e:
-        # LOG the error for you (the developer) to see in Render logs
         print(f"[ERROR] AI GENERATION CRASHED: {str(e)}")
-        # RETURN a safe response to the user/tester so they don't see the crash
         return "Beta, the internet is not working properly. Can you repeat?"
 
 def dispatch_report(session_id: str, data: Dict):
@@ -266,4 +290,3 @@ def index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
