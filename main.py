@@ -36,6 +36,7 @@ def configure_ai():
         print(f"[INFO] Configuring AI with Key Index #{CURRENT_KEY_INDEX}...")
         genai.configure(api_key=current_key)
         
+        # Priority list of stable models
         candidates = [
             "gemini-1.5-flash",
             "gemini-1.5-pro",
@@ -44,16 +45,13 @@ def configure_ai():
         
         for model_name in candidates:
             try:
-                print(f"[INFO] Testing connection to: {model_name}...")
-                test_model = genai.GenerativeModel(model_name)
-                test_model.generate_content("Test connection")
-                ai_model = test_model
-                print(f"[SUCCESS] AI Configured using model: {model_name}")
+                ai_model = genai.GenerativeModel(model_name)
+                print(f"[SUCCESS] AI Initialized using model: {model_name}")
                 return
             except Exception as e:
-                print(f"[FAILED] {model_name} failed: {e}")
+                print(f"[FAILED] {model_name} initialization failed: {e}")
 
-        print("\n[WARNING] KNOWN MODELS FAILED. Searching for safe fallback...")
+        # Fallback
         try:
             for m in genai.list_models():
                 if 'generateContent' in m.supported_generation_methods:
@@ -161,19 +159,8 @@ def get_matched_keywords(text: str) -> List[str]:
     return [t for t in SCAM_TRIGGERS if t in text_lower]
 
 def detect_scam_via_llm(text: str) -> bool:
-    if ai_model is None: return False
-    try:
-        prompt = f"""
-        Analyze this message for scam intent (supports English, Hindi, Tamil, Telugu, Hinglish). 
-        Message: "{text}"
-        Rules: Return strictly "TRUE" if it tries to steal money, credentials, or create urgency. Otherwise "FALSE".
-        Answer (TRUE/FALSE):
-        """
-        response = ai_model.generate_content(prompt)
-        clean_resp = response.text.strip().upper()
-        return "TRUE" in clean_resp
-    except:
-        return False
+    # OPTIMIZATION: Disabled to reduce latency.
+    return False
 
 def is_suspicious(text: str) -> bool:
     text_lower = text.lower()
@@ -183,12 +170,14 @@ def is_suspicious(text: str) -> bool:
     if has_link or has_phone: return True
     return False
 
-def generate_persona_reply(user_input: str, history: List[Message]) -> str:
+# CHANGED TO ASYNC DEF FOR SPEED
+async def generate_persona_reply(user_input: str, history: List[Message]) -> str:
     if ai_model is None:
         print("[CRITICAL] AI model is None during reply generation.")
         return random.choice(FALLBACK_REPLIES)
 
-    for attempt in range(3):
+    # FAST RETRY: Only 1 retry to avoid timeouts
+    for attempt in range(2):
         try:
             last_bot_msg = ""
             for msg in reversed(history):
@@ -220,7 +209,9 @@ def generate_persona_reply(user_input: str, history: List[Message]) -> str:
             """
             
             config = genai.GenerationConfig(temperature=1.0)
-            response = ai_model.generate_content(prompt, generation_config=config)
+            
+            # ASYNC GENERATION FOR SPEED
+            response = await ai_model.generate_content_async(prompt, generation_config=config)
             reply_text = response.text.strip()
 
             if reply_text.lower() == last_bot_msg.lower() or len(reply_text) < 5:
@@ -230,14 +221,10 @@ def generate_persona_reply(user_input: str, history: List[Message]) -> str:
             return reply_text
 
         except Exception as e:
-            if "429" in str(e) or "403" in str(e):
-                print(f"[WARNING] API Error ({e}). Attempting Key Rotation...")
+            if any(err in str(e) for err in ["429", "403", "404"]):
+                print(f"[WARNING] API Error ({e}). Rotating & Retrying immediately...")
                 if rotate_key():
-                    continue
-                else:
-                    print(f"[WARNING] Rotation failed (only 1 key). Retrying in 2s...")
-                    time.sleep(2)
-                    continue
+                    continue # Retry immediately (NO SLEEP)
             else:
                 print(f"[ERROR] AI GENERATION CRASHED: {str(e)}")
                 break 
@@ -287,15 +274,13 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks,
             if kw not in session["extractedIntelligence"]["suspiciousKeywords"]:
                 session["extractedIntelligence"]["suspiciousKeywords"].append(kw)
 
-    if not session["is_scam"]:
-        if detect_scam_via_llm(msg_text):
-            session["is_scam"] = True
-            session["extractedIntelligence"]["suspiciousKeywords"].append("AI_DETECTED_SUSPICIOUS_CONTENT")
+    # REMOVED: detect_scam_via_llm call to reduce latency.
 
     new_intel = scan_for_intel(msg_text, session)
     
     if session["is_scam"]:
-        reply = generate_persona_reply(msg_text, req.conversationHistory)
+        # AWAIT IS REQUIRED NOW
+        reply = await generate_persona_reply(msg_text, req.conversationHistory)
     else:
         reply = "I am sorry, who is this message for?"
 
