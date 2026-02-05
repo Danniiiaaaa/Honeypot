@@ -60,10 +60,10 @@ def configure_ai():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Run AI setup ONLY after server starts
-    print(" Server starting... Initializing AI Brain...")
+    print("🚀 Server starting... Initializing AI Brain...")
     configure_ai()
     yield
-    print(" Server shutting down...")
+    print("🛑 Server shutting down...")
 
 # Data Models
 class Message(BaseModel):
@@ -134,6 +134,11 @@ def scan_for_intel(text: str, session: Dict) -> bool:
                 session["extractedIntelligence"][category].append(clean_item)
                 updated = True
     return updated
+
+def get_matched_keywords(text: str) -> List[str]:
+    """Helper to find which specific keywords triggered the detection."""
+    text_lower = text.lower()
+    return [t for t in SCAM_TRIGGERS if t in text_lower]
 
 def detect_scam_via_llm(text: str) -> bool:
     """
@@ -251,17 +256,22 @@ async def handle_webhook(
     session["turns"] += 1
     
     # === HYBRID DETECTION LOGIC ===
-    if not session["is_scam"]:
-        # Step 1: Fast Rule Check
-        if is_suspicious(msg_text):
+    # Check for keywords regardless of whether scam is already detected, to populate intel
+    matched_keywords = get_matched_keywords(msg_text)
+    if matched_keywords:
+        if not session["is_scam"]:
             session["is_scam"] = True
-            session["extractedIntelligence"]["suspiciousKeywords"].append("keyword_match")
             print(f"Scam Detected via Keywords: {sid}")
-        
-        # Step 2: AI Fallback Check (If keywords failed)
-        elif detect_scam_via_llm(msg_text):
+        # Add new keywords to intel if they aren't there already
+        for kw in matched_keywords:
+            if kw not in session["extractedIntelligence"]["suspiciousKeywords"]:
+                session["extractedIntelligence"]["suspiciousKeywords"].append(kw)
+
+    # If not yet detected by keywords, try AI
+    if not session["is_scam"]:
+        if detect_scam_via_llm(msg_text):
             session["is_scam"] = True
-            session["extractedIntelligence"]["suspiciousKeywords"].append("ai_model_detection")
+            session["extractedIntelligence"]["suspiciousKeywords"].append("AI_DETECTED_SUSPICIOUS_CONTENT")
             print(f"Scam Detected via AI Model: {sid}")
 
     new_intel = scan_for_intel(msg_text, session)
@@ -283,3 +293,4 @@ def index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
