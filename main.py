@@ -305,8 +305,11 @@ async def generate_persona_reply(user_input: str, history: List[Message]) -> str
             
             config = genai.GenerationConfig(temperature=1.0)
             
-            # FIXED: Using Synchronous call in a Thread to solve 404/Async bugs
-            response = await asyncio.to_thread(ai_model.generate_content, prompt, generation_config=config)
+            # FIXED: Added 5-second hard timeout to prevent tester hang
+            response = await asyncio.wait_for(
+                asyncio.to_thread(ai_model.generate_content, prompt, generation_config=config),
+                timeout=5.0
+            )
             reply_text = response.text.strip()
 
             if reply_text.lower() == last_bot_msg.lower() or len(reply_text) < 5:
@@ -315,13 +318,18 @@ async def generate_persona_reply(user_input: str, history: List[Message]) -> str
 
             return reply_text
 
+        except asyncio.TimeoutError:
+            print(f"[WARNING] AI Generation Timed Out (Attempt {attempt+1}). Using fallback.")
+            if attempt == 1: 
+                 return random.choice(FALLBACK_REPLIES)
+            continue
+
         except Exception as e:
             if any(err in str(e) for err in ["429", "403", "404"]):
                 print(f"[WARNING] API Error ({e}). Attempting Key Rotation...")
                 if rotate_key():
                     continue 
                 else:
-                    # If we only have 1 key and it fails, wait and retry once
                     print(f"[WARNING] Rotation failed (only 1 key). Retrying in 2s...")
                     await asyncio.sleep(2)
                     continue
