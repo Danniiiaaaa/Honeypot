@@ -20,9 +20,21 @@ REPORTING_ENDPOINT = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 
 ai_model = None
 
+FALLBACK_POOL = [
+    "Beta, please wait... signal is very low.",
+    "One minute beta, I am looking for my glasses.",
+    "Hello? I can't hear you properly, the pressure cooker is whistling.",
+    "Wait, my phone screen just went dark. What did you say?",
+    "I am pressing the buttons but nothing is happening, hold on.",
+    "Are you there? My grandson is calling on the other line.",
+    "Just a moment, let me find a pen to write this down."
+]
+
 def configure_ai():
     global ai_model, CURRENT_KEY_INDEX
-    if not API_KEYS: return
+    if not API_KEYS:
+        print("[CRITICAL] No API Keys found in environment!")
+        return
     try:
         genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
         ai_model = genai.GenerativeModel("gemini-1.5-flash")
@@ -97,7 +109,8 @@ class WebhookRequest(BaseModel):
 active_sessions: Dict[str, Dict[str, Any]] = {}
 
 async def get_jeji_response(user_input: str, history: List[Message], session: Dict) -> str:
-    if not ai_model: return "Hello? Beta, line is bad."
+    if not ai_model:
+        return random.choice(FALLBACK_POOL)
     
     last_replies = session.get("last_replies", [])
     current_activity = random.choice([
@@ -109,41 +122,32 @@ async def get_jeji_response(user_input: str, history: List[Message], session: Di
     has_acc = len(session["extractedIntelligence"]["bankAccounts"]) > 0
     
     bait_msg = "Ask for their payment details or ID politely." if not (has_upi or has_acc) else "Keep them waiting while you 'check' the app."
-
     forbidden_context = f"Avoid repeating: {', '.join(last_replies)}" if last_replies else ""
 
     prompt = f"""
     ROLE: You are 'Jeji', an elderly Indian grandmother. 
     IDENTITY: You are technically confused. Currently you are {current_activity}.
-    
-    MULTILINGUAL CAPABILITY: 
-    Detect the user's language (Hindi, Tamil, Telugu, Bengali, Marathi, etc.) or Hinglish/Tanglish.
-    RESPOND ONLY in that same language or dialect. Be very natural.
-    
+    MULTILINGUAL CAPABILITY: Detect language (Hindi, Tamil, Telugu, Bengali, etc.) and respond in kind.
     {bait_msg}
     {forbidden_context}
-    
-    DIRECTIVES:
-    1. Stay in character. MAX 20 WORDS.
-    2. Be brief, use regional slang if appropriate.
-    3. Do NOT mention you are an AI or a bot.
-    
+    DIRECTIVES: Character-driven, MAX 20 WORDS, no AI mentions.
     SCAMMER INPUT: "{user_input}"
-    
     JEJI'S RESPONSE:
     """
 
     try:
         res = await asyncio.wait_for(
             asyncio.to_thread(ai_model.generate_content, prompt), 
-            timeout=5.0
+            timeout=7.0
         )
         reply = res.text.strip()
+        if not reply: raise ValueError("Empty reply")
         session["last_replies"] = (last_replies + [reply])[-3:]
         return reply
-    except Exception:
+    except Exception as e:
+        print(f"[DEBUG] Generation error: {e}")
         rotate_key()
-        return "Beta, please wait... signal is very low."
+        return random.choice(FALLBACK_POOL)
 
 def send_intel_report(sid: str, session: Dict):
     payload = {
@@ -155,7 +159,7 @@ def send_intel_report(sid: str, session: Dict):
     }
     headers = {"x-api-key": API_ACCESS_TOKEN} if API_ACCESS_TOKEN else {}
     try:
-        requests.post(REPORTING_ENDPOINT, json=payload, headers=headers, timeout=2)
+        requests.post(REPORTING_ENDPOINT, json=payload, headers=headers, timeout=5)
     except: pass
 
 @app.post("/api/honeypot")
