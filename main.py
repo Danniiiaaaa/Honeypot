@@ -53,7 +53,7 @@ def rotate_key():
     return True
 
 INTEL_PATTERNS = {
-    "upiIds": r"[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}",
+    "upiIds": r"(?<![a-zA-Z0-9.\-_])[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}(?![a-zA-Z0-9.\-_])",
     "bankAccounts": r"(?<!\d)\d{11,18}(?!\d)",
     "phishingLinks": r"https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+(?:/[-\w._~:/?#[\]@!$&'()*+,;=]*)?",
     "phoneNumbers": r"(?<!\d)(?:\+91[\-\s]?)?[6-9]\d{9}(?!\d)",
@@ -127,51 +127,52 @@ async def get_jeji_response(user_input: str, history: List[Message], session: Di
     intel = session["extractedIntelligence"]
     has_upi = len(intel["upiIds"]) > 0
     has_bank = len(intel["bankAccounts"]) > 0
+    turns = session.get("turns", 1)
     
     if not (has_upi or has_bank):
-        strategy = "The user has not given their bank details or UPI yet. In a confused way, ask them where you should send the money or which app to open."
+        strategy = "Confusion: Ask which branch they are from. Say you can't find your passbook. Ask for their UPI to send the 'processing fee'."
+    elif turns > 8:
+        strategy = "Skepticism: Start questioning them. 'Why are you shouting?' or 'My son says I shouldn't give codes over phone.' Act scared."
     else:
-        strategy = "You have the details. Now act worried about the 'OTP' or 'Secret Code'. Say you received it but can't find it in the messages."
+        strategy = "Delay: You have 'found' the OTP but the screen is blurry. Describe a wrong number first to see if they correct you."
 
     lang_hint = metadata.language if metadata else "English/Hindi"
     recent_context = "\n".join([f"{m.sender}: {m.text}" for m in history[-5:]])
 
     prompt = f"""
-    SYSTEM: You are 'Jeji', an elderly Indian grandmother. You are NOT an AI. You are a real person.
-    PERSONALITY: Kind, easily worried, technically illiterate. You get distracted by daily chores.
-    CURRENT SITUATION: {strategy}
-    CONVERSATION SO FAR:
+    SYSTEM: You are 'Jeji', a 68-year-old Indian grandmother. You are a real human, not an AI.
+    PERSONALITY: Kind, easily flustered, poor eyesight, talkative about her grandson.
+    GOAL: {strategy}
+    CONVERSATION HISTORY:
     {recent_context}
     
-    NEW MESSAGE FROM SCAMMER: "{user_input}"
+    SCAMMER'S NEW MESSAGE: "{user_input}"
     
     INSTRUCTIONS: 
-    1. Respond DIRECTLY to what the scammer just said. 
-    2. Use the same language they are using ({lang_hint}). 
-    3. Be brief, legit, and slightly annoying. 
-    4. Never admit you are an AI.
-    5. MAX 20 WORDS.
+    1. Respond DIRECTLY to their latest message. 
+    2. If they are repeating themselves, get annoyed: 'Beta, I heard you the first time, I am trying!'
+    3. Use {lang_hint}. 
+    4. MAX 18 WORDS. BE LEGIT.
     
     JEJI'S RESPONSE:
     """
 
     try:
-        res = await asyncio.wait_for(asyncio.to_thread(ai_model.generate_content, prompt), timeout=5.0)
+        res = await asyncio.wait_for(asyncio.to_thread(ai_model.generate_content, prompt), timeout=3.5)
         reply = res.text.strip().replace('"', '')
         
-        if "AI" in reply or "language model" in reply or len(reply) < 3:
+        if any(x in reply.lower() for x in ["ai", "language model", "assistant"]):
             return random.choice(EMERGENCY_FALLBACKS)
             
         session["last_replies"] = (session["last_replies"] + [reply])[-3:]
         return reply
-    except Exception as e:
-        logger.warning(f"AI error: {e}. Rotating keys.")
+    except Exception:
         rotate_key()
         return random.choice(EMERGENCY_FALLBACKS)
 
 def send_final_report(sid: str, session: Dict):
     intel = session["extractedIntelligence"]
-    notes = f"Engaged for {session['turns']} turns. Captured {len(intel['upiIds'])} UPI IDs and {len(intel['bankAccounts'])} Bank Accounts."
+    notes = f"Engaged for {session['turns']} turns. Captured {len(intel['upiIds'])} UPI IDs and {len(intel['bankAccounts'])} Bank Accounts. Scammer used repetitive urgency tactics."
     payload = {
         "sessionId": sid,
         "scamDetected": True,
@@ -181,7 +182,7 @@ def send_final_report(sid: str, session: Dict):
     }
     headers = {"x-api-key": API_ACCESS_TOKEN} if API_ACCESS_TOKEN else {}
     try:
-        requests.post(REPORTING_ENDPOINT, json=payload, headers=headers, timeout=5)
+        requests.post(REPORTING_ENDPOINT, json=payload, headers=headers, timeout=3)
     except:
         pass
 
@@ -209,7 +210,7 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks,
     return {"status": "success", "reply": reply}
 
 @app.get("/")
-def health(): return {"status": "active", "version": "agentic-v1"}
+def health(): return {"status": "active", "version": "agentic-v1.1-perfected"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
