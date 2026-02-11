@@ -2,6 +2,7 @@ import os
 import json
 import re
 import requests
+import asyncio
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 from google import genai
@@ -52,7 +53,7 @@ async def call_model(prompt):
 
     for _ in range(len(API_KEYS)):
         try:
-            response = current_c.models.generate_content(
+            response = await current_c.aio.models.generate_content(
                 model="gemini-2.0-flash",
                 contents=prompt
             )
@@ -111,17 +112,17 @@ async def honeypot(request: Request):
         }
 
         try:
-            requests.post(REPORTING_ENDPOINT, json=payload, timeout=5)
+            loop = asyncio.get_event_loop()
+            loop.run_in_executor(None, lambda: requests.post(REPORTING_ENDPOINT, json=payload, timeout=5))
         except Exception:
             pass
 
-        return {"status": "success", "reply": reply}
+    else:
+        prompt = f"Respond naturally to this message: {data.message.text}"
+        reply = await call_model(prompt)
 
-    prompt = f"Respond naturally to this message: {data.message.text}"
-    reply = await call_model(prompt)
-
-    if reply is None:
-        return {"status": "error", "reply": "Service busy"}
+        if reply is None:
+            return {"status": "error", "reply": "Service busy"}
 
     return {"status": "success", "reply": reply}
 
