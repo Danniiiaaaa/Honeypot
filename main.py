@@ -1,71 +1,108 @@
 import os
-import json
-import asyncio
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-import uvicorn
+from fastapi import FastAPI, Request, HTTPException
+from pydantic import BaseModel
 from google.genai import Client
-from google.genai.types import GenerateContentConfig
+import requests
 
 _raw_keys = os.environ.get("GEMINI_KEY", "")
 API_KEYS = [k.strip() for k in _raw_keys.split(",") if k.strip()]
 CURRENT_KEY_INDEX = 0
-
 API_ACCESS_TOKEN = os.environ.get("API_ACCESS_TOKEN")
 REPORTING_ENDPOINT = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 
 client = None
 
-def get_client():
-    global client, CURRENT_KEY_INDEX
+def rotate_key():
+    global CURRENT_KEY_INDEX, client
+    if not API_KEYS:
+        return None
+    CURRENT_KEY_INDEX = (CURRENT_KEY_INDEX + 1) % len(API_KEYS)
     key = API_KEYS[CURRENT_KEY_INDEX]
     client = Client(api_key=key)
+    return client
 
-async def rotate_key():
-    global CURRENT_KEY_INDEX
-    CURRENT_KEY_INDEX = (CURRENT_KEY_INDEX + 1) % len(API_KEYS)
-    get_client()
+def get_client():
+    global client
+    if client is None:
+        if not API_KEYS:
+            return None
+        client = Client(api_key=API_KEYS[0])
+    return client
 
-get_client()
+class Message(BaseModel):
+    sender: str
+    text: str
+    timestamp: int
+
+class RequestBody(BaseModel):
+    sessionId: str
+    message: Message
+    conversationHistory: list = []
+    metadata: dict = None
+
 app = FastAPI()
 
-@app.get("/")
-async def root():
-    return {"status": "running"}
+async def call_model(prompt):
+    global client
+    c = get_client()
+    if c is None:
+        return None
+    for _ in range(len(API_KEYS)):
+        try:
+            r = c.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+            return r.text
+        except Exception:
+            rotate_key()
+    return None
 
 @app.post("/api/honeypot")
 async def honeypot(request: Request):
-    data = await request.json()
-    user_prompt = data.get("prompt", "")
+    headers = request.headers
+    if headers.get("x-api-key") != API_ACCESS_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
-    for _ in range(len(API_KEYS)):
+    body = await request.json()
+    data = RequestBody(**body)
+
+    msg = data.message.text.lower()
+    scam_keywords = ["account blocked", "verify", "otp", "upi", "bank", "urgent", "suspend", "locked", "pin"]
+    scam_detected = any(k in msg for k in scam_keywords)
+
+    if scam_detected:
+        history = "\n".join([f"{m['sender']}: {m['text']}" for m in data.conversationHistory])
+        prompt = f"You are a human. Continue the conversation naturally. Never reveal you're an AI.\nHistory:\n{history}\nScammer: {data.message.text}\nYour reply:"
+        reply = await call_model(prompt)
+        if reply is None:
+            return {"status": "error", "reply": "All API keys failed"}
+
+        intel_prompt = f"Extract scam intelligence from this conversation. Return JSON with fields: bankAccounts, upiIds, phishingLinks, phoneNumbers, suspiciousKeywords.\nConversation:\n{history}\nScammer: {data.message.text}"
+        intel_raw = await call_model(intel_prompt)
+        if intel_raw is None:
+            intel_raw = "{}"
+
         try:
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=user_prompt,
-                config=GenerateContentConfig(
-                    temperature=0.2,
-                    max_output_tokens=500
-                )
-            )
-            ai_text = response.text
-            return JSONResponse(
-                {
-                    "status": True,
-                    "message": "success",
-                    "finalAnswer": ai_text
-                }
-            )
-        except Exception:
-            await rotate_key()
+            extracted_intel = eval(intel_raw)
+        except:
+            extracted_intel = {}
 
-    return JSONResponse(
-        {
-            "status": False,
-            "message": "All API keys failed",
-            "finalAnswer": ""
+        payload = {
+            "sessionId": data.sessionId,
+            "scamDetected": True,
+            "totalMessagesExchanged": len(data.conversationHistory) + 1,
+            "extractedIntelligence": extracted_intel,
+            "agentNotes": "Scam conversation handled"
         }
-    )
 
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=False)
+        try:
+            requests.post(REPORTING_ENDPOINT, json=payload, timeout=5)
+        except:
+            pass
+
+        return {"status": "success", "reply": reply}
+
+    prompt = f"Respond as a normal human: {data.message.text}"
+    reply = await call_model(prompt)
+    if reply is None:
+        return {"status": "error", "reply": "All API keys failed"}
+
+    return {"status": "success", "reply": reply}
