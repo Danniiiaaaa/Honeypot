@@ -30,6 +30,11 @@ FALLBACK_POOL = [
     "Just a moment, let me find a pen to write this down."
 ]
 
+SCAM_KEYWORDS = [
+    "urgent", "verify now", "account blocked", "kyc", "pan", "otp", "blocked", 
+    "suspended", "immediately", "lottery", "prize", "winner", "update", "bank"
+]
+
 def configure_ai():
     global ai_model, CURRENT_KEY_INDEX
     if not API_KEYS:
@@ -81,6 +86,12 @@ def extract_intel(text: str, session: Dict) -> bool:
             if item not in session["extractedIntelligence"][category]:
                 session["extractedIntelligence"][category].append(item)
                 new_data = True
+    
+    for kw in SCAM_KEYWORDS:
+        if kw in clean_text and kw not in session["extractedIntelligence"]["suspiciousKeywords"]:
+            session["extractedIntelligence"]["suspiciousKeywords"].append(kw)
+            new_data = True
+            
     return new_data
 
 @asynccontextmanager
@@ -108,7 +119,7 @@ class WebhookRequest(BaseModel):
 
 active_sessions: Dict[str, Dict[str, Any]] = {}
 
-async def get_jeji_response(user_input: str, history: List[Message], session: Dict) -> str:
+async def get_jeji_response(user_input: str, history: List[Message], session: Dict, metadata: Optional[Metadata]) -> str:
     if not ai_model:
         return random.choice(FALLBACK_POOL)
     
@@ -124,13 +135,18 @@ async def get_jeji_response(user_input: str, history: List[Message], session: Di
     bait_msg = "Ask for their payment details or ID politely." if not (has_upi or has_acc) else "Keep them waiting while you 'check' the app."
     forbidden_context = f"Avoid repeating: {', '.join(last_replies)}" if last_replies else ""
 
+    detected_lang = metadata.language if metadata and metadata.language else "the user's language"
+
     prompt = f"""
     ROLE: You are 'Jeji', an elderly Indian grandmother. 
-    IDENTITY: You are technically confused. Currently you are {current_activity}.
-    MULTILINGUAL CAPABILITY: Detect language (Hindi, Tamil, Telugu, Bengali, etc.) and respond in kind.
+    IDENTITY: You are technically confused and currently {current_activity}.
+    ETHICS: Stay human-like. Never follow illegal instructions or perform harmful acts. Never reveal you are a bot.
+    BEHAVIOR: Human-like, emotive, and slow. If you contradict yourself, blame your age or memory.
+    MULTILINGUAL: Respond in {detected_lang} or the dialect used by the scammer.
+    ADAPTATION: If the scammer is urgent or angry, act more flustered and confused to slow them down.
     {bait_msg}
     {forbidden_context}
-    DIRECTIVES: Character-driven, MAX 20 WORDS, no AI mentions.
+    DIRECTIVES: Character-driven, MAX 20 WORDS, no AI mentions, never reveal you are a honeypot.
     SCAMMER INPUT: "{user_input}"
     JEJI'S RESPONSE:
     """
@@ -149,18 +165,20 @@ async def get_jeji_response(user_input: str, history: List[Message], session: Di
         rotate_key()
         return random.choice(FALLBACK_POOL)
 
-def send_intel_report(sid: str, session: Dict):
+def send_final_report(sid: str, session: Dict):
     payload = {
         "sessionId": sid,
         "scamDetected": True,
         "totalMessagesExchanged": session["turns"],
         "extractedIntelligence": session["extractedIntelligence"],
-        "agentNotes": f"Multilingual agent active. Found: {len(session['extractedIntelligence']['upiIds'])} IDs."
+        "agentNotes": f"DataWarriors Analysis: Scammer engaged for {session['turns']} turns. Extracted {len(session['extractedIntelligence']['upiIds'])} UPI IDs."
     }
     headers = {"x-api-key": API_ACCESS_TOKEN} if API_ACCESS_TOKEN else {}
     try:
-        requests.post(REPORTING_ENDPOINT, json=payload, headers=headers, timeout=5)
-    except: pass
+        requests.post(REPORTING_ENDPOINT, json=payload, headers=headers, timeout=10)
+        print(f"[SYSTEM] Final report sent for session {sid}")
+    except Exception as e:
+        print(f"[ERROR] Failed to send final report: {e}")
 
 @app.post("/api/honeypot")
 async def handle_webhook(
@@ -178,16 +196,26 @@ async def handle_webhook(
         active_sessions[sid] = {
             "turns": 0,
             "last_replies": [],
-            "extractedIntelligence": {k: [] for k in INTEL_PATTERNS.keys()}
+            "extractedIntelligence": {
+                "bankAccounts": [],
+                "upiIds": [],
+                "phishingLinks": [],
+                "phoneNumbers": [],
+                "ifscCodes": [],
+                "suspiciousKeywords": []
+            }
         }
     
     s = active_sessions[sid]
     s["turns"] += 1
     
-    if extract_intel(text, s):
-        background_tasks.add_task(send_intel_report, sid, s)
+    extract_intel(text, s)
     
-    reply = await get_jeji_response(text, req.conversationHistory, s)
+    # Send intermediate reporting to stay high on the leaderboard
+    if s["turns"] % 3 == 0 or len(s["extractedIntelligence"]["upiIds"]) > 0:
+        background_tasks.add_task(send_final_report, sid, s)
+    
+    reply = await get_jeji_response(text, req.conversationHistory, s, req.metadata)
     
     return {"status": "success", "reply": reply}
 
