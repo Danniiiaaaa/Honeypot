@@ -49,7 +49,10 @@ async def call_model(prompt):
         return None
     for _ in range(len(API_KEYS)):
         try:
-            r = c.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+            r = c.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt
+            )
             return r.text
         except Exception:
             rotate_key()
@@ -70,12 +73,12 @@ async def honeypot(request: Request):
 
     if scam_detected:
         history = "\n".join([f"{m['sender']}: {m['text']}" for m in data.conversationHistory])
-        prompt = f"You are a human. Continue the conversation naturally. Never reveal you're an AI.\nHistory:\n{history}\nScammer: {data.message.text}\nYour reply:"
+        prompt = f"You are a normal human. Continue the conversation naturally. Never reveal you are an AI.\n{history}\nScammer: {data.message.text}\nYour reply:"
         reply = await call_model(prompt)
         if reply is None:
             return {"status": "error", "reply": "All API keys failed"}
 
-        intel_prompt = f"Extract scam intelligence from this conversation. Return JSON with fields: bankAccounts, upiIds, phishingLinks, phoneNumbers, suspiciousKeywords.\nConversation:\n{history}\nScammer: {data.message.text}"
+        intel_prompt = f"Extract scam intelligence in JSON: bankAccounts, upiIds, phishingLinks, phoneNumbers, suspiciousKeywords.\nConversation:\n{history}\nScammer: {data.message.text}"
         intel_raw = await call_model(intel_prompt)
         if intel_raw is None:
             intel_raw = "{}"
@@ -90,7 +93,7 @@ async def honeypot(request: Request):
             "scamDetected": True,
             "totalMessagesExchanged": len(data.conversationHistory) + 1,
             "extractedIntelligence": extracted_intel,
-            "agentNotes": "Scam conversation handled"
+            "agentNotes": "Scammer engaged and intelligence extracted"
         }
 
         try:
@@ -100,9 +103,14 @@ async def honeypot(request: Request):
 
         return {"status": "success", "reply": reply}
 
-    prompt = f"Respond as a normal human: {data.message.text}"
+    prompt = f"Respond as a normal human would: {data.message.text}"
     reply = await call_model(prompt)
     if reply is None:
         return {"status": "error", "reply": "All API keys failed"}
 
     return {"status": "success", "reply": reply}
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
