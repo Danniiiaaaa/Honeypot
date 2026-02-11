@@ -1,7 +1,7 @@
 import os
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
-from google.genai import Client
+from google import genai
 import requests
 
 _raw_keys = os.environ.get("GEMINI_KEY", "")
@@ -18,7 +18,7 @@ def rotate_key():
         return None
     CURRENT_KEY_INDEX = (CURRENT_KEY_INDEX + 1) % len(API_KEYS)
     key = API_KEYS[CURRENT_KEY_INDEX]
-    client = Client(api_key=key)
+    client = genai.Client(api_key=key)
     return client
 
 def get_client():
@@ -26,7 +26,7 @@ def get_client():
     if client is None:
         if not API_KEYS:
             return None
-        client = Client(api_key=API_KEYS[0])
+        client = genai.Client(api_key=API_KEYS[0])
     return client
 
 class Message(BaseModel):
@@ -47,15 +47,17 @@ async def call_model(prompt):
     c = get_client()
     if c is None:
         return None
+
     for _ in range(len(API_KEYS)):
         try:
-            r = c.models.generate_content(
+            r = c.responses.generate(
                 model="gemini-2.0-flash",
                 contents=prompt
             )
             return r.text
-        except Exception:
+        except Exception as e:
             rotate_key()
+
     return None
 
 @app.post("/api/honeypot")
@@ -73,12 +75,22 @@ async def honeypot(request: Request):
 
     if scam_detected:
         history = "\n".join([f"{m['sender']}: {m['text']}" for m in data.conversationHistory])
-        prompt = f"You are a normal human. Continue the conversation naturally. Never reveal you are an AI.\n{history}\nScammer: {data.message.text}\nYour reply:"
+        prompt = (
+            "You are a normal human. Continue the conversation naturally. "
+            "Never reveal you are an AI.\n"
+            f"{history}\nScammer: {data.message.text}\nYour reply:"
+        )
+
         reply = await call_model(prompt)
         if reply is None:
             return {"status": "error", "reply": "All API keys failed"}
 
-        intel_prompt = f"Extract scam intelligence in JSON: bankAccounts, upiIds, phishingLinks, phoneNumbers, suspiciousKeywords.\nConversation:\n{history}\nScammer: {data.message.text}"
+        intel_prompt = (
+            "Extract scam intelligence in JSON: bankAccounts, upiIds, phishingLinks, "
+            "phoneNumbers, suspiciousKeywords.\nConversation:\n"
+            f"{history}\nScammer: {data.message.text}"
+        )
+
         intel_raw = await call_model(intel_prompt)
         if intel_raw is None:
             intel_raw = "{}"
@@ -105,6 +117,7 @@ async def honeypot(request: Request):
 
     prompt = f"Respond as a normal human would: {data.message.text}"
     reply = await call_model(prompt)
+
     if reply is None:
         return {"status": "error", "reply": "All API keys failed"}
 
