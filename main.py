@@ -1,71 +1,105 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import logging
+import google.generativeai as genai
+import re
 import os
-from openai import OpenAI
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import time
 
 app = FastAPI()
 
-API_KEY = os.getenv("OPENAI_API_KEY")
-if not API_KEY:
-    logger.critical("OPENAI_API_KEY is missing in environment variables!")
-    raise RuntimeError("OPENAI_API_KEY not found.")
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-client = OpenAI(api_key=API_KEY)
+sessions = {}
+
+class Message(BaseModel):
+    sender: str
+    text: str
+    timestamp: str
 
 class HoneypotRequest(BaseModel):
-    prompt: str
+    sessionId: str
+    message: Message
+    conversationHistory: list
+    metadata: dict
+
+def extract_phone_numbers(text):
+    phones = re.findall(r'\b(?:\+91[-\s]?)?[6-9]\d{9}\b', text)
+    return list(set(phones))
+
+def extract_account_numbers(text):
+    accs = re.findall(r'\b\d{9,18}\b', text)
+    result = []
+    for a in accs:
+        if not re.fullmatch(r'(?:\+91)?[6-9]\d{9}', a):
+            result.append(a)
+    return list(set(result))
+
+def extract_upi(text):
+    upi = re.findall(r'\b[\w.-]+@[\w.-]+\b', text)
+    return list(set(upi))
+
+def extract_links(text):
+    links = re.findall(r'(https?://[^\s]+)', text)
+    return list(set(links))
+
+def extract_emails(text):
+    mails = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', text)
+    return list(set(mails))
+
+def ai_response(user_msg):
+    model = genai.GenerativeModel("gemini-pro")
+    out = model.generate_content(
+        "You are a scam-honeypot. Respond with short, curious, non-revealing questions only.\nScammer: "
+        + user_msg
+    )
+    return out.text.strip()
 
 @app.post("/api/honeypot")
-async def honeypot_endpoint(data: HoneypotRequest):
-    user_msg = data.prompt.strip()
+async def honeypot(data: HoneypotRequest):
+    sid = data.sessionId
+    scam_msg = data.message.text.strip()
 
-    if not user_msg:
-        raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
+    if sid not in sessions:
+        sessions[sid] = {"turns": 1, "msgs": [], "intel": {
+            "phoneNumbers": [],
+            "bankAccounts": [],
+            "upiIds": [],
+            "phishingLinks": [],
+            "emailAddresses": []
+        }}
+    else:
+        sessions[sid]["turns"] += 1
 
-    logger.info(f"Incoming prompt: {user_msg}")
+    sessions[sid]["msgs"].append({"sender": "scammer", "text": scam_msg})
 
-    preferred_model = "gpt-4.1-mini"
-    fallback_model = "gpt-3.5-turbo"
+    phones = extract_phone_numbers(scam_msg)
+    accs = extract_account_numbers(scam_msg)
+    upis = extract_upi(scam_msg)
+    links = extract_links(scam_msg)
+    mails = extract_emails(scam_msg)
 
-    try:
-        response = client.chat.completions.create(
-            model=preferred_model,
-            messages=[
-                {"role": "system", "content": "You are a honeypot AI. Respond simply."},
-                {"role": "user", "content": user_msg}
-            ]
-        )
-        ai_reply = response.choices[0].message.content
-        logger.info(f"Reply generated using {preferred_model}")
+    sessions[sid]["intel"]["phoneNumbers"].extend([p for p in phones if p not in sessions[sid]["intel"]["phoneNumbers"]])
+    sessions[sid]["intel"]["bankAccounts"].extend([a for a in accs if a not in sessions[sid]["intel"]["bankAccounts"]])
+    sessions[sid]["intel"]["upiIds"].extend([u for u in upis if u not in sessions[sid]["intel"]["upiIds"]])
+    sessions[sid]["intel"]["phishingLinks"].extend([l for l in links if l not in sessions[sid]["intel"]["phishingLinks"]])
+    sessions[sid]["intel"]["emailAddresses"].extend([e for e in mails if e not in sessions[sid]["intel"]["emailAddresses"]])
 
-    except Exception as e:
-        logger.error(f"Primary Model Error: {e}")
-        logger.info("Fallback to backup model...")
-        try:
-            response = client.chat.completions.create(
-                model=fallback_model,
-                messages=[
-                    {"role": "system", "content": "You are a honeypot AI. Respond simply."},
-                    {"role": "user", "content": user_msg}
-                ]
-            )
-            ai_reply = response.choices[0].message.content
-            logger.info(f"Reply generated using {fallback_model}")
+    reply = ai_response(scam_msg)
 
-        except Exception as e2:
-            logger.critical(f"Fallback Model Failed: {e2}")
-            raise HTTPException(status_code=500, detail="AI model is not available.")
+    sessions[sid]["msgs"].append({"sender": "user", "text": reply})
 
-    return {
-        "success": True,
-        "model_used": preferred_model,
-        "reply": ai_reply
-    }
+    if sessions[sid]["turns"] >= 10:
+        final_out = {
+            "sessionId": sid,
+            "scamDetected": True,
+            "totalMessagesExchanged": len(sessions[sid]["msgs"]),
+            "extractedIntelligence": sessions[sid]["intel"],
+            "agentNotes": "Scam conversation simulated and logged."
+        }
+        return final_out
+
+    return {"status": "success", "reply": reply}
 
 @app.get("/")
 async def root():
-    return {"status": "Honeypot API running successfully."}
+    return {"status": "running"}
