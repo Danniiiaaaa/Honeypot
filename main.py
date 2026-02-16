@@ -71,7 +71,7 @@ class WebhookRequest(BaseModel):
 INTEL_PATTERNS = {
     "upiIds": r"\b[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}\b(?!\.)",
     "bankAccounts": r"\b\d{11,18}\b",
-    "phishingLinks": r"https?://[^\s]+",
+    "phishingLinks": r"(https?://[^\s]+|bit\.ly/[^\s]+|tinyurl\.com/[^\s]+|[a-zA-Z0-9\-]+\.(com|in|co)/[^\s]*)",
     "phoneNumbers": r"(?<!\d)(?:\+91[\-\s]?)?[6-9]\d{9}\b",
     "emailAddresses": r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
 }
@@ -83,6 +83,19 @@ SCAM_SCORE_KEYWORDS = {
     "offer": 10, "deal": 10, "gift": 15,
     "prize": 15, "refund": 15, "cashback": 15
 }
+
+BAIT_QUESTIONS = [
+    "How will I receive the refund amount?",
+    "Should I send money through UPI or bank transfer?",
+    "Which UPI ID should I send it to?",
+    "Can you send the payment link please?",
+    "Can you share the account number to verify the refund?",
+    "Do you have an official website link?",
+    "Can you send the verification link again?",
+    "Can you email me the details from your official email?",
+    "Can you share the transaction reference number?",
+    "Can you send the refund confirmation screenshot link?"
+]
 
 FALLBACK_REPLIES = [
     "Which department are you calling from?",
@@ -112,6 +125,10 @@ def update_risk_score(text: str, session: Dict):
         session["is_scam"] = True
 
 async def generate_persona_reply(user_input: str, session: Dict) -> str:
+    turn = session["turns"]
+    if turn >= 3 and random.random() < 0.6:
+        return random.choice(BAIT_QUESTIONS)
+
     if ai_model is None:
         return random.choice(FALLBACK_REPLIES)
 
@@ -121,15 +138,12 @@ async def generate_persona_reply(user_input: str, session: Dict) -> str:
 You are a polite confused Indian grandmother talking to a suspicious caller.
 
 Language: {language}
-
-Caller message:
-{user_input}
+Caller message: {user_input}
 
 Rules:
 • Never share OTP, PIN or personal details
 • Always ask a question to keep the caller talking
-• Ask for ID, callback number, branch or proof
-• Sound polite and confused
+• Ask for ID, callback number or branch
 
 Reply in ONE sentence and end with a question.
 """
@@ -162,7 +176,7 @@ def dispatch_final_report(session_id: str, session_data: Dict):
             "engagementDurationSeconds": duration,
             "totalMessagesExchanged": total_msgs
         },
-        "agentNotes": "Adaptive scam bait persona engaging across fraud scenarios."
+        "agentNotes": "Bait-driven persona extracting scam infrastructure."
     }
 
     try:
@@ -196,7 +210,7 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks)
     reply = await generate_persona_reply(text, session)
     session["reply_history"].append(reply)
 
-    if session["turns"] >= 5 and not session["reported"]:
+    if session["turns"] >= 7 and not session["reported"]:
         session["reported"] = True
         background_tasks.add_task(dispatch_final_report, sid, session)
         background_tasks.add_task(cleanup_session, sid)
