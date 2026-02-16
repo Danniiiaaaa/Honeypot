@@ -109,8 +109,19 @@ app = FastAPI(lifespan=lifespan)
 active_sessions: Dict[str, Dict] = {}
 
 def scan_for_intel(text: str, session: Dict):
-    for cat, pattern in INTEL_PATTERNS.items():
-        found = re.findall(pattern, text)
+    emails = re.findall(INTEL_PATTERNS["emailAddresses"], text)
+    for e in emails:
+        if e not in session["extractedIntelligence"]["emailAddresses"]:
+            session["extractedIntelligence"]["emailAddresses"].append(e)
+    text_without_emails = text
+    for e in emails:
+        text_without_emails = text_without_emails.replace(e, "")
+    upis = re.findall(INTEL_PATTERNS["upiIds"], text_without_emails)
+    for u in upis:
+        if u not in session["extractedIntelligence"]["upiIds"]:
+            session["extractedIntelligence"]["upiIds"].append(u)
+    for cat in ["bankAccounts","phishingLinks","phoneNumbers"]:
+        found = re.findall(INTEL_PATTERNS[cat], text)
         for item in found:
             if item not in session["extractedIntelligence"][cat]:
                 session["extractedIntelligence"][cat].append(item)
@@ -128,26 +139,19 @@ async def generate_persona_reply(user_input: str, session: Dict) -> str:
     turn = session["turns"]
     if turn >= 3 and random.random() < 0.6:
         return random.choice(BAIT_QUESTIONS)
-
     if ai_model is None:
         return random.choice(FALLBACK_REPLIES)
-
     language = session.get("language", "English")
-
     prompt = f"""
 You are a polite confused Indian grandmother talking to a suspicious caller.
-
 Language: {language}
 Caller message: {user_input}
-
 Rules:
-• Never share OTP, PIN or personal details
-• Always ask a question to keep the caller talking
-• Ask for ID, callback number or branch
-
-Reply in ONE sentence and end with a question.
+Never share OTP, PIN or personal details.
+Always ask a question.
+Ask for proof, link, email, payment method or callback number.
+Reply in ONE sentence ending with a question.
 """
-
     try:
         response = await asyncio.to_thread(ai_model.generate_content, prompt)
         reply = extract_gemini_text(response)
@@ -165,7 +169,6 @@ def cleanup_session(sid):
 def dispatch_final_report(session_id: str, session_data: Dict):
     duration = int(time.time() - session_data["startTime"])
     total_msgs = session_data["turns"] * 2
-
     payload = {
         "sessionId": session_id,
         "status": "success",
@@ -176,9 +179,8 @@ def dispatch_final_report(session_id: str, session_data: Dict):
             "engagementDurationSeconds": duration,
             "totalMessagesExchanged": total_msgs
         },
-        "agentNotes": "Bait-driven persona extracting scam infrastructure."
+        "agentNotes": "Bait driven persona extracting scam infrastructure."
     }
-
     try:
         requests.post(REPORTING_ENDPOINT, json=payload, timeout=5)
     except:
@@ -187,7 +189,6 @@ def dispatch_final_report(session_id: str, session_data: Dict):
 @app.post("/api/honeypot")
 async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks):
     sid = req.sessionId
-
     if sid not in active_sessions:
         active_sessions[sid] = {
             "is_scam": False,
@@ -199,22 +200,17 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks)
             "language": req.metadata.get("language", "English") if req.metadata else "English",
             "extractedIntelligence": {k: [] for k in INTEL_PATTERNS.keys()},
         }
-
     session = active_sessions[sid]
     session["turns"] += 1
-
     text = req.message.text
     scan_for_intel(text, session)
     update_risk_score(text, session)
-
     reply = await generate_persona_reply(text, session)
     session["reply_history"].append(reply)
-
     if session["turns"] >= 7 and not session["reported"]:
         session["reported"] = True
         background_tasks.add_task(dispatch_final_report, sid, session)
         background_tasks.add_task(cleanup_session, sid)
-
     return {"status": "success", "reply": reply}
 
 if __name__ == "__main__":
