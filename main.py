@@ -6,7 +6,7 @@ import requests
 import uvicorn
 import random
 import google.generativeai as genai
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, Header, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
@@ -15,6 +15,7 @@ _raw_keys = os.environ.get("GEMINI_KEY", "")
 API_KEYS = [k.strip() for k in _raw_keys.split(',') if k.strip()]
 CURRENT_KEY_INDEX = 0
 REPORTING_ENDPOINT = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
+API_KEY = os.environ.get("API_KEY")
 ai_model = None
 
 def configure_ai():
@@ -40,22 +41,14 @@ def rotate_key():
     configure_ai()
     return True
 
-def extract_gemini_text(response):
-    try:
-        if hasattr(response, "text") and response.text:
-            return response.text.strip()
-        if response.candidates:
-            parts = response.candidates[0].content.parts
-            texts = [p.text for p in parts if hasattr(p, "text")]
-            return " ".join(texts).strip()
-    except:
-        return None
-    return None
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_ai()
     yield
+
+async def verify_api_key(x_api_key: str = Header(default=None)):
+    if API_KEY and x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
 class Message(BaseModel):
     sender: str
@@ -186,7 +179,7 @@ def dispatch_final_report(session_id: str, session_data: Dict):
     except:
         pass
 
-@app.post("/api/honeypot")
+@app.post("/api/honeypot", dependencies=[Depends(verify_api_key)])
 async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks):
     sid = req.sessionId
     if sid not in active_sessions:
