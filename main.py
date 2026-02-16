@@ -104,16 +104,21 @@ def scan_for_intel(text: str, session: Dict):
     for e in emails:
         if e not in session["extractedIntelligence"]["emailAddresses"]:
             session["extractedIntelligence"]["emailAddresses"].append(e)
+
     upis = re.findall(INTEL_PATTERNS["upiIds"], text)
     for u in upis:
         if u not in session["extractedIntelligence"]["upiIds"]:
             session["extractedIntelligence"]["upiIds"].append(u)
+
     links = re.findall(INTEL_PATTERNS["phishingLinks"], text)
     for l in links:
         if isinstance(l, tuple):
             l = l[0]
-        if l and l not in session["extractedIntelligence"]["phishingLinks"]:
-            session["extractedIntelligence"]["phishingLinks"].append(l)
+        if l:
+            l = l.rstrip(".,!?:;)")
+            if l not in session["extractedIntelligence"]["phishingLinks"]:
+                session["extractedIntelligence"]["phishingLinks"].append(l)
+
     for cat in ["bankAccounts","phoneNumbers"]:
         found = re.findall(INTEL_PATTERNS[cat], text)
         for item in found:
@@ -143,15 +148,13 @@ async def generate_persona_reply(user_input: str, session: Dict) -> str:
         return "Should I send money through UPI or bank transfer?"
     if turn >= 6 and random.random() < 0.5:
         return pick_fallback(session)
+
     if ai_model is None:
         return pick_fallback(session)
+
     language = session.get("language", "English")
-    prompt = f"""
-You are a polite confused Indian grandmother talking to a suspicious caller.
-Language: {language}
-Caller message: {user_input}
-Reply in ONE short question asking for proof or verification.
-"""
+    prompt = f"You are a polite confused Indian grandmother talking to a suspicious caller. Language: {language}. Caller message: {user_input}. Reply in ONE short question asking for proof or verification."
+
     try:
         response = await asyncio.to_thread(ai_model.generate_content, prompt)
         reply = extract_gemini_text(response)
@@ -201,17 +204,22 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks)
             "language": req.metadata.get("language", "English") if req.metadata else "English",
             "extractedIntelligence": {k: [] for k in INTEL_PATTERNS.keys()},
         }
+
     session = active_sessions[sid]
     session["turns"] += 1
+
     text = req.message.text
     scan_for_intel(text, session)
     update_risk_score(text, session)
+
     reply = await generate_persona_reply(text, session)
     session["reply_history"].append(reply)
+
     if session["turns"] >= 9 and not session["reported"]:
         session["reported"] = True
         background_tasks.add_task(dispatch_final_report, sid, session)
         background_tasks.add_task(cleanup_session, sid)
+
     return {"status": "success", "reply": reply}
 
 if __name__ == "__main__":
