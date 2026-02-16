@@ -71,7 +71,7 @@ class WebhookRequest(BaseModel):
 INTEL_PATTERNS = {
     "upiIds": r"\b[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}\b(?!\.)",
     "bankAccounts": r"\b\d{11,18}\b",
-    "phishingLinks": r"(https?://[^\s]+|bit\.ly/[^\s]+|tinyurl\.com/[^\s]+|[a-zA-Z0-9\-]+\.(com|in|co)/[^\s]*)",
+    "phishingLinks": r"(https?://[^\s]+|bit\.ly/[^\s]+|tinyurl\.com/[^\s]+|[a-zA-Z0-9\-]+\.(?:com|in|co)/[^\s]*)",
     "phoneNumbers": r"(?<!\d)(?:\+91[\-\s]?)?[6-9]\d{9}\b",
     "emailAddresses": r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
 }
@@ -84,43 +84,37 @@ SCAM_SCORE_KEYWORDS = {
     "prize": 15, "refund": 15, "cashback": 15
 }
 
-BAIT_QUESTIONS = [
-    "How will I receive the refund amount?",
-    "Should I send money through UPI or bank transfer?",
-    "Which UPI ID should I send it to?",
-    "Can you send the payment link please?",
-    "Can you share the account number to verify the refund?",
-    "Do you have an official website link?",
-    "Can you send the verification link again?",
-    "Can you email me the details from your official email?",
-    "Can you share the transaction reference number?",
-    "Can you send the refund confirmation screenshot link?"
-]
-
 FALLBACK_REPLIES = [
     "Which department are you calling from?",
-    "Can you give your employee ID please?",
     "What is your official callback number?",
     "Which branch are you calling from?",
-    "Can you verify your identity first?"
+    "Can you verify your identity first?",
+    "I received an OTP screen, where do I enter it?"
 ]
 
 app = FastAPI(lifespan=lifespan)
 active_sessions: Dict[str, Dict] = {}
+
+def pick_fallback(session):
+    options = [r for r in FALLBACK_REPLIES if r not in session["reply_history"]]
+    return random.choice(options) if options else random.choice(FALLBACK_REPLIES)
 
 def scan_for_intel(text: str, session: Dict):
     emails = re.findall(INTEL_PATTERNS["emailAddresses"], text)
     for e in emails:
         if e not in session["extractedIntelligence"]["emailAddresses"]:
             session["extractedIntelligence"]["emailAddresses"].append(e)
-    text_without_emails = text
-    for e in emails:
-        text_without_emails = text_without_emails.replace(e, "")
-    upis = re.findall(INTEL_PATTERNS["upiIds"], text_without_emails)
+    upis = re.findall(INTEL_PATTERNS["upiIds"], text)
     for u in upis:
         if u not in session["extractedIntelligence"]["upiIds"]:
             session["extractedIntelligence"]["upiIds"].append(u)
-    for cat in ["bankAccounts","phishingLinks","phoneNumbers"]:
+    links = re.findall(INTEL_PATTERNS["phishingLinks"], text)
+    for l in links:
+        if isinstance(l, tuple):
+            l = l[0]
+        if l and l not in session["extractedIntelligence"]["phishingLinks"]:
+            session["extractedIntelligence"]["phishingLinks"].append(l)
+    for cat in ["bankAccounts","phoneNumbers"]:
         found = re.findall(INTEL_PATTERNS[cat], text)
         for item in found:
             if item not in session["extractedIntelligence"][cat]:
@@ -137,20 +131,26 @@ def update_risk_score(text: str, session: Dict):
 
 async def generate_persona_reply(user_input: str, session: Dict) -> str:
     turn = session["turns"]
-    if turn >= 3 and random.random() < 0.6:
-        return random.choice(BAIT_QUESTIONS)
+    if turn == 1:
+        return "Which branch are you calling from?"
+    if turn == 2:
+        return "I am ready to fix this, where should I click or send the details?"
+    if turn == 3:
+        return "What is the official website or portal link?"
+    if turn == 4:
+        return "Can you email me the instructions from your official email?"
+    if turn == 5:
+        return "Should I send money through UPI or bank transfer?"
+    if turn >= 6 and random.random() < 0.5:
+        return pick_fallback(session)
     if ai_model is None:
-        return random.choice(FALLBACK_REPLIES)
+        return pick_fallback(session)
     language = session.get("language", "English")
     prompt = f"""
 You are a polite confused Indian grandmother talking to a suspicious caller.
 Language: {language}
 Caller message: {user_input}
-Rules:
-Never share OTP, PIN or personal details.
-Always ask a question.
-Ask for proof, link, email, payment method or callback number.
-Reply in ONE sentence ending with a question.
+Reply in ONE short question asking for proof or verification.
 """
     try:
         response = await asyncio.to_thread(ai_model.generate_content, prompt)
@@ -160,7 +160,7 @@ Reply in ONE sentence ending with a question.
         return reply
     except:
         rotate_key()
-        return random.choice(FALLBACK_REPLIES)
+        return pick_fallback(session)
 
 def cleanup_session(sid):
     time.sleep(30)
@@ -169,6 +169,7 @@ def cleanup_session(sid):
 def dispatch_final_report(session_id: str, session_data: Dict):
     duration = int(time.time() - session_data["startTime"])
     total_msgs = session_data["turns"] * 2
+    notes = f"Phones:{session_data['extractedIntelligence']['phoneNumbers']} UPI:{session_data['extractedIntelligence']['upiIds']} Accounts:{session_data['extractedIntelligence']['bankAccounts']} Links:{session_data['extractedIntelligence']['phishingLinks']} Emails:{session_data['extractedIntelligence']['emailAddresses']}"
     payload = {
         "sessionId": session_id,
         "status": "success",
@@ -179,7 +180,7 @@ def dispatch_final_report(session_id: str, session_data: Dict):
             "engagementDurationSeconds": duration,
             "totalMessagesExchanged": total_msgs
         },
-        "agentNotes": "Bait driven persona extracting scam infrastructure."
+        "agentNotes": notes
     }
     try:
         requests.post(REPORTING_ENDPOINT, json=payload, timeout=5)
@@ -207,7 +208,7 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks)
     update_risk_score(text, session)
     reply = await generate_persona_reply(text, session)
     session["reply_history"].append(reply)
-    if session["turns"] >= 7 and not session["reported"]:
+    if session["turns"] >= 9 and not session["reported"]:
         session["reported"] = True
         background_tasks.add_task(dispatch_final_report, sid, session)
         background_tasks.add_task(cleanup_session, sid)
