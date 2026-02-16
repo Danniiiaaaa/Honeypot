@@ -84,7 +84,7 @@ SCAM_SCORE_KEYWORDS = {
     "prize": 15, "refund": 15, "cashback": 15
 }
 
-FALLBACK_REPLIES = [
+EARLY_QUESTIONS = [
     "Which department are you calling from?",
     "What is your official callback number?",
     "Which branch are you calling from?",
@@ -92,12 +92,21 @@ FALLBACK_REPLIES = [
     "I received an OTP screen, where do I enter it?"
 ]
 
+LATE_QUESTIONS = [
+    "Do you have a backup number in case this line disconnects?",
+    "Is there another UPI ID in case this one fails?",
+    "Can you send the link again from your main website?",
+    "Do you have a WhatsApp number for support?",
+    "Can your senior officer contact me directly?",
+    "Is there another email I can CC for confirmation?"
+]
+
 app = FastAPI(lifespan=lifespan)
 active_sessions: Dict[str, Dict] = {}
 
-def pick_fallback(session):
-    options = [r for r in FALLBACK_REPLIES if r not in session["reply_history"]]
-    return random.choice(options) if options else random.choice(FALLBACK_REPLIES)
+def pick_unique(options, session):
+    available = [r for r in options if r not in session["reply_history"]]
+    return random.choice(available) if available else random.choice(options)
 
 def scan_for_intel(text: str, session: Dict):
     emails = re.findall(INTEL_PATTERNS["emailAddresses"], text)
@@ -146,15 +155,12 @@ async def generate_persona_reply(user_input: str, session: Dict) -> str:
         return "Can you email me the instructions from your official email?"
     if turn == 5:
         return "Should I send money through UPI or bank transfer?"
-    if turn >= 6 and random.random() < 0.5:
-        return pick_fallback(session)
-
+    if turn >= 6:
+        return pick_unique(LATE_QUESTIONS, session)
     if ai_model is None:
-        return pick_fallback(session)
+        return pick_unique(EARLY_QUESTIONS, session)
 
-    language = session.get("language", "English")
-    prompt = f"You are a polite confused Indian grandmother talking to a suspicious caller. Language: {language}. Caller message: {user_input}. Reply in ONE short question asking for proof or verification."
-
+    prompt = f"You are a polite confused Indian grandmother talking to a suspicious caller. Caller message: {user_input}. Reply with one short verification question."
     try:
         response = await asyncio.to_thread(ai_model.generate_content, prompt)
         reply = extract_gemini_text(response)
@@ -163,7 +169,7 @@ async def generate_persona_reply(user_input: str, session: Dict) -> str:
         return reply
     except:
         rotate_key()
-        return pick_fallback(session)
+        return pick_unique(EARLY_QUESTIONS, session)
 
 def cleanup_session(sid):
     time.sleep(30)
@@ -201,14 +207,13 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks)
             "reply_history": [],
             "reported": False,
             "risk_score": 0,
-            "language": req.metadata.get("language", "English") if req.metadata else "English",
             "extractedIntelligence": {k: [] for k in INTEL_PATTERNS.keys()},
         }
 
     session = active_sessions[sid]
     session["turns"] += 1
-
     text = req.message.text
+
     scan_for_intel(text, session)
     update_risk_score(text, session)
 
