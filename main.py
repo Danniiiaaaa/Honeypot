@@ -43,7 +43,6 @@ async def lifespan(app: FastAPI):
 class Message(BaseModel):
     sender: str
     text: str
-    timestamp: Optional[Any] = None
 
 class WebhookRequest(BaseModel):
     sessionId: str
@@ -94,18 +93,18 @@ async def generate_persona_reply(user_input: str, session: Dict) -> str:
     text = user_input.lower()
     recent_history = ", ".join(session["reply_history"][-2:])
     
-    if any(x in text for x in ["otp", "one time", "verification code"]):
-        instruction = "Refuse to share OTP. Ask which department they are from and for their name."
+    if any(x in text for x in ["otp", "one time"]):
+        instruction = "Act concerned but refuse to share OTP. Ask which department they are from and their name."
     elif any(x in text for x in ["sbi", "bank", "fraud", "blocked", "freeze"]):
-        instruction = "Ask for their official employee ID and which city their branch is in."
+        instruction = "Tell them you are worried. Ask for their official employee ID and branch location."
     elif any(x in text for x in ["urgent", "immediately", "fast", "act now"]):
-        instruction = "Say you are recording this. Ask for their official callback number."
+        instruction = "Say you need to record this for your son. Ask for their official callback number."
     elif any(x in text for x in ["account", "number", "details"]):
         instruction = "Refuse to share details. Ask for their staff authorization code first."
     elif any(x in text for x in ["payment", "upi", "txn", "refund"]):
-        instruction = "Ask for their employee badge number and UPI ID to verify them."
+        instruction = "Say you want to verify them. Ask for their employee badge number and UPI ID."
     else:
-        instruction = "Act confused and ask for their banking officer identification code."
+        instruction = "Act like a slow, polite grandmother. Ask for their authorized banking officer identification code."
 
     prompt = f"""
     Role: Jeji, a 68-year-old grandmother. 
@@ -114,16 +113,17 @@ async def generate_persona_reply(user_input: str, session: Dict) -> str:
     Scammer said: "{user_input}"
     Instruction: {instruction}
     Directives:
-    - Reply in the same language as the scammer (English/Hindi/Hinglish).
-    - DO NOT repeat these phrases: [{recent_history}].
-    - Max 25 words. Stay in character.
+    - Reply in the same language as the scammer (English, Hindi, or Hinglish).
+    - DO NOT repeat these previous lines: [{recent_history}].
+    - Use natural, grandmotherly phrasing. Max 25 words. Stay in character.
     """
 
     try:
         response = await asyncio.to_thread(ai_model.generate_content, prompt)
         reply = response.text.strip()
         if not reply or any(prev.lower() in reply.lower() for prev in session["reply_history"]):
-            return random.choice([r for r in FALLBACK_REPLIES if r not in session["reply_history"]])
+            available = [r for r in FALLBACK_REPLIES if r not in session["reply_history"]]
+            return random.choice(available) if available else FALLBACK_REPLIES[0]
         return reply
     except Exception:
         rotate_key()
@@ -133,15 +133,10 @@ def dispatch_final_report(session_id: str, session_data: Dict):
     duration = int(time.time() - session_data["startTime"])
     payload = {
         "sessionId": session_id,
-        "status": "success",
         "scamDetected": session_data["is_scam"],
         "totalMessagesExchanged": session_data["turns"] * 2,
         "extractedIntelligence": session_data["extractedIntelligence"],
-        "engagementMetrics": {
-            "engagementDurationSeconds": duration,
-            "totalMessagesExchanged": session_data["turns"]
-        },
-        "agentNotes": "Hybrid keyword-LLM persona Jeji. Strategy: Identify and bait for credentials."
+        "agentNotes": f"Persona Jeji maintained engagement for {duration}s. Strategy: Confused grandmother requesting identity verification."
     }
     try:
         requests.post(REPORTING_ENDPOINT, json=payload, timeout=5)
@@ -158,7 +153,9 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks)
         active_sessions[sid] = {
             "is_scam": False, "turns": 0, "startTime": time.time(),
             "reply_history": [], "reported": False,
-            "extractedIntelligence": {k: [] for k in INTEL_PATTERNS.keys()}
+            "extractedIntelligence": {
+                "phoneNumbers": [], "bankAccounts": [], "upiIds": [], "phishingLinks": [], "emailAddresses": []
+            }
         }
     
     session = active_sessions[sid]
