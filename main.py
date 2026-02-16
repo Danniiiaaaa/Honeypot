@@ -1,74 +1,54 @@
 import os
 import re
 import time
-import random
+import asyncio
 import requests
 import uvicorn
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
+import random
+import google.generativeai as genai
+from fastapi import FastAPI, BackgroundTasks, Header, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 
-API_KEY = os.getenv("HONEYPOT_API_KEY", "abcd1234")
+_raw_keys = os.environ.get("GEMINI_KEY", "")
+API_KEYS = [k.strip() for k in _raw_keys.split(',') if k.strip()]
+CURRENT_KEY_INDEX = 0
 REPORTING_ENDPOINT = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
+API_KEY = os.environ.get("API_KEY")
+ai_model = None
 
-INTEL_PATTERNS = {
-    "upiIds": r"\b[\w\.-]{2,256}@[a-zA-Z]{2,64}\b",
-    "bankAccounts": r"\b\d{11,18}\b",
-    "phishingLinks": r"(https?://[^\s]+)",
-    "phoneNumbers": r"(\+91[-\s]?[6-9]\d{9})",
-    "emailAddresses": r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b"
-}
+def configure_ai():
+    global ai_model, CURRENT_KEY_INDEX
+    if not API_KEYS:
+        return
+    genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
+    ai_model = genai.GenerativeModel(
+        "gemini-1.5-flash",
+        safety_settings=[
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ],
+    )
 
-SCAM_TRIGGERS = ["otp","urgent","blocked","verify","compromised","winner","cashback","kyc","claim","refund","payment"]
+def rotate_key():
+    global CURRENT_KEY_INDEX
+    if len(API_KEYS) <= 1:
+        return False
+    CURRENT_KEY_INDEX = (CURRENT_KEY_INDEX + 1) % len(API_KEYS)
+    configure_ai()
+    return True
 
-SCAM_CATEGORIES = {
-    "bank": ["bank","account","otp","blocked","kyc"],
-    "upi": ["upi","cashback","reward","refund","paytm"],
-    "phishing": ["offer","deal","iphone","selected","claim"],
-    "job": ["job","hiring","salary","interview"],
-    "delivery": ["parcel","delivery","courier"],
-    "investment": ["investment","crypto","profit","trading"]
-}
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    configure_ai()
+    yield
 
-QUESTION_BANK = {
-    "bank":[
-        "Which branch are you calling from?",
-        "What is the official website or portal link?",
-        "Can you email me the instructions from your official email?",
-        "Should I send money through UPI or bank transfer?"
-    ],
-    "upi":[
-        "Which UPI ID should I send the payment to?",
-        "How will I receive the cashback?",
-        "Is there a customer support number?",
-        "Can you email me the payment instructions?"
-    ],
-    "phishing":[
-        "What is the official website link?",
-        "Do you have a support email?",
-        "Is there a customer support number?",
-        "Where do I enter my details?"
-    ],
-    "job":[
-        "Can you share the official company website?",
-        "What is the HR email ID?",
-        "Where will the interview happen?",
-        "Can you share the recruiter phone number?"
-    ],
-    "delivery":[
-        "Can you send the tracking link?",
-        "Which courier company is this?",
-        "Do you have a support number?",
-        "Can you email me the delivery details?"
-    ],
-    "investment":[
-        "What is the trading website link?",
-        "Can your advisor call me directly?",
-        "Do you have a support email?",
-        "How do I withdraw the profit?"
-    ]
-}
+async def verify_api_key(x_api_key: str = Header(default=None)):
+    if API_KEY and x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
 class Message(BaseModel):
     sender: str
@@ -81,98 +61,154 @@ class WebhookRequest(BaseModel):
     conversationHistory: List[Message] = []
     metadata: Optional[Dict] = None
 
-app = FastAPI()
+INTEL_PATTERNS = {
+    "upiIds": r"\b[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}\b(?!\.)",
+    "bankAccounts": r"\b\d{11,18}\b",
+    "phishingLinks": r"(https?://[^\s]+|bit\.ly/[^\s]+|tinyurl\.com/[^\s]+|[a-zA-Z0-9\-]+\.(?:com|in|co)/[^\s]*)",
+    "phoneNumbers": r"(?<!\d)(?:\+91[\-\s]?)?[6-9]\d{9}\b",
+    "emailAddresses": r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
+}
+
+SCAM_SCORE_KEYWORDS = {
+    "otp": 30, "pin": 30, "upi": 25, "kyc": 15,
+    "blocked": 15, "urgent": 10, "verify": 10,
+    "http": 20, "https": 20, "link": 15,
+    "offer": 10, "deal": 10, "gift": 15,
+    "prize": 15, "refund": 15, "cashback": 15
+}
+
+EARLY_QUESTIONS = [
+    "Which department are you calling from?",
+    "What is your official callback number?",
+    "Which branch are you calling from?",
+    "Can you verify your identity first?",
+    "I received an OTP screen, where do I enter it?"
+]
+
+LATE_QUESTIONS = [
+    "Do you have a backup number in case this line disconnects?",
+    "Is there another UPI ID in case this one fails?",
+    "Can you send the link again from your main website?",
+    "Do you have a WhatsApp number for support?",
+    "Can your senior officer contact me directly?",
+    "Is there another email I can CC for confirmation?"
+]
+
+app = FastAPI(lifespan=lifespan)
 active_sessions: Dict[str, Dict] = {}
 
-def clean(item):
-    return item.strip().rstrip(".,;:!?)]}")
-
-def detect_category(text):
-    text=text.lower()
-    for c,k in SCAM_CATEGORIES.items():
-        if any(x in text for x in k):
-            return c
-    return "bank"
-
 def pick_unique(options, session):
-    for q in options:
-        if q not in session["reply_history"]:
-            return q
-    return random.choice(options)
+    available = [r for r in options if r not in session["reply_history"]]
+    return random.choice(available) if available else random.choice(options)
 
-def scan_for_intel(text, session):
-    for cat,pattern in INTEL_PATTERNS.items():
-        found=re.findall(pattern,text)
+def scan_for_intel(text: str, session: Dict):
+    clean_text = text.replace(",", " ").replace(";", " ").replace(":", " ")
+    emails = re.findall(INTEL_PATTERNS["emailAddresses"], clean_text)
+    for e in emails:
+        e = e.rstrip(".,!?:;)")
+        if e not in session["extractedIntelligence"]["emailAddresses"]:
+            session["extractedIntelligence"]["emailAddresses"].append(e)
+
+    upis = re.findall(INTEL_PATTERNS["upiIds"], text)
+    for u in upis:
+        if u not in session["extractedIntelligence"]["upiIds"]:
+            session["extractedIntelligence"]["upiIds"].append(u)
+
+    links = re.findall(INTEL_PATTERNS["phishingLinks"], text)
+    for l in links:
+        if isinstance(l, tuple):
+            l = l[0]
+        if l:
+            l = l.rstrip(".,!?:;)")
+            if l not in session["extractedIntelligence"]["phishingLinks"]:
+                session["extractedIntelligence"]["phishingLinks"].append(l)
+
+    for cat in ["bankAccounts","phoneNumbers"]:
+        found = re.findall(INTEL_PATTERNS[cat], text)
         for item in found:
-            item=clean(item)
-            if cat=="upiIds" and "." in item.split("@")[-1]:
-                session["extractedIntelligence"]["emailAddresses"].append(item)
             if item not in session["extractedIntelligence"][cat]:
                 session["extractedIntelligence"][cat].append(item)
 
-def generate_persona_reply(text, session):
-    turn=session["turns"]
-    if "category" not in session:
-        session["category"]=detect_category(text)
-    questions=QUESTION_BANK.get(session["category"],QUESTION_BANK["bank"])
-    if turn<=len(questions):
-        return questions[turn-1]
-    return pick_unique([
-        "Do you have a backup number in case this line disconnects?",
-        "Is there another email I can CC for confirmation?",
-        "Can you send the link again from your main website?",
-        "Do you have a WhatsApp number for support?",
-        "Can your senior officer contact me directly?",
-        "Is there another UPI ID in case this one fails?"
-    ],session)
+def update_risk_score(text: str, session: Dict):
+    score = session.get("risk_score", 0)
+    for word, weight in SCAM_SCORE_KEYWORDS.items():
+        if word in text.lower():
+            score += weight
+    session["risk_score"] = score
+    if score >= 20:
+        session["is_scam"] = True
 
-def dispatch_final_report(session_id,session):
-    duration=int(time.time()-session["startTime"])
-    payload={
-        "sessionId":session_id,
-        "status":"success",
-        "scamDetected":session["is_scam"],
-        "totalMessagesExchanged":session["turns"]*2,
-        "extractedIntelligence":session["extractedIntelligence"],
-        "engagementMetrics":{
-            "engagementDurationSeconds":duration,
-            "totalMessagesExchanged":session["turns"]
+async def generate_persona_reply(user_input: str, session: Dict) -> str:
+    turn = session["turns"]
+    if turn == 1:
+        return "Which branch are you calling from?"
+    if turn == 2:
+        return "I am ready to fix this, where should I click or send the details?"
+    if turn == 3:
+        return "What is the official website or portal link?"
+    if turn == 4:
+        return "Can you email me the instructions from your official email?"
+    if turn == 5:
+        return "Should I send money through UPI or bank transfer?"
+    if turn >= 6:
+        return pick_unique(LATE_QUESTIONS, session)
+    return pick_unique(EARLY_QUESTIONS, session)
+
+def cleanup_session(sid):
+    time.sleep(30)
+    active_sessions.pop(sid, None)
+
+def dispatch_final_report(session_id: str, session_data: Dict):
+    duration = int(time.time() - session_data["startTime"])
+    total_msgs = session_data["turns"] * 2
+    notes = f"Phones:{session_data['extractedIntelligence']['phoneNumbers']} UPI:{session_data['extractedIntelligence']['upiIds']} Accounts:{session_data['extractedIntelligence']['bankAccounts']} Links:{session_data['extractedIntelligence']['phishingLinks']} Emails:{session_data['extractedIntelligence']['emailAddresses']}"
+    payload = {
+        "sessionId": session_id,
+        "status": "success",
+        "scamDetected": session_data["is_scam"],
+        "totalMessagesExchanged": total_msgs,
+        "extractedIntelligence": session_data["extractedIntelligence"],
+        "engagementMetrics": {
+            "engagementDurationSeconds": duration,
+            "totalMessagesExchanged": total_msgs
         },
-        "agentNotes":str(session["extractedIntelligence"])
+        "agentNotes": notes
     }
     try:
-        requests.post(REPORTING_ENDPOINT,json=payload,timeout=5)
+        requests.post(REPORTING_ENDPOINT, json=payload, timeout=5)
     except:
         pass
 
-@app.post("/honeypot")
-async def honeypot(req:WebhookRequest, background_tasks:BackgroundTasks, x_api_key: str = Header(None)):
-    if x_api_key!=API_KEY:
-        raise HTTPException(status_code=401,detail="Invalid API key")
-
-    sid=req.sessionId
+@app.post("/api/honeypot", dependencies=[Depends(verify_api_key)])
+async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks):
+    sid = req.sessionId
     if sid not in active_sessions:
-        active_sessions[sid]={
-            "is_scam":False,"turns":0,"startTime":time.time(),
-            "reply_history":[],"reported":False,
-            "extractedIntelligence":{k:[] for k in INTEL_PATTERNS.keys()}
+        active_sessions[sid] = {
+            "is_scam": False,
+            "turns": 0,
+            "startTime": time.time(),
+            "reply_history": [],
+            "reported": False,
+            "risk_score": 0,
+            "extractedIntelligence": {k: [] for k in INTEL_PATTERNS.keys()},
         }
 
-    session=active_sessions[sid]
-    session["turns"]+=1
+    session = active_sessions[sid]
+    session["turns"] += 1
+    text = req.message.text
 
-    if any(k in req.message.text.lower() for k in SCAM_TRIGGERS):
-        session["is_scam"]=True
+    scan_for_intel(text, session)
+    update_risk_score(text, session)
 
-    scan_for_intel(req.message.text,session)
-    reply=generate_persona_reply(req.message.text,session)
+    reply = await generate_persona_reply(text, session)
     session["reply_history"].append(reply)
 
-    if session["turns"]>=10 and not session["reported"]:
-        session["reported"]=True
-        background_tasks.add_task(dispatch_final_report,sid,session)
+    if session["turns"] >= 9 and not session["reported"]:
+        session["reported"] = True
+        background_tasks.add_task(dispatch_final_report, sid, session)
+        background_tasks.add_task(cleanup_session, sid)
 
-    return {"status":"success","reply":reply}
+    return {"status": "success", "reply": reply}
 
-if __name__=="__main__":
-    uvicorn.run(app,host="0.0.0.0",port=int(os.environ.get("PORT",8000)))
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
