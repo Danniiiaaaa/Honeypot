@@ -109,8 +109,10 @@ def pick_unique(options, session):
     return random.choice(available) if available else random.choice(options)
 
 def scan_for_intel(text: str, session: Dict):
-    emails = re.findall(INTEL_PATTERNS["emailAddresses"], text)
+    clean_text = text.replace(",", " ").replace(";", " ").replace(":", " ")
+    emails = re.findall(INTEL_PATTERNS["emailAddresses"], clean_text)
     for e in emails:
+        e = e.rstrip(".,!?:;)")
         if e not in session["extractedIntelligence"]["emailAddresses"]:
             session["extractedIntelligence"]["emailAddresses"].append(e)
 
@@ -157,19 +159,7 @@ async def generate_persona_reply(user_input: str, session: Dict) -> str:
         return "Should I send money through UPI or bank transfer?"
     if turn >= 6:
         return pick_unique(LATE_QUESTIONS, session)
-    if ai_model is None:
-        return pick_unique(EARLY_QUESTIONS, session)
-
-    prompt = f"You are a polite confused Indian grandmother talking to a suspicious caller. Caller message: {user_input}. Reply with one short verification question."
-    try:
-        response = await asyncio.to_thread(ai_model.generate_content, prompt)
-        reply = extract_gemini_text(response)
-        if not reply or reply in session["reply_history"]:
-            raise Exception()
-        return reply
-    except:
-        rotate_key()
-        return pick_unique(EARLY_QUESTIONS, session)
+    return pick_unique(EARLY_QUESTIONS, session)
 
 def cleanup_session(sid):
     time.sleep(30)
