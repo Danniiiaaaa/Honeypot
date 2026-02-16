@@ -48,7 +48,7 @@ def extract_gemini_text(response):
             parts = response.candidates[0].content.parts
             texts = [p.text for p in parts if hasattr(p, "text")]
             return " ".join(texts).strip()
-    except Exception:
+    except:
         return None
     return None
 
@@ -77,16 +77,19 @@ INTEL_PATTERNS = {
 }
 
 SCAM_SCORE_KEYWORDS = {
-    "otp": 30, "pin": 30, "upi": 25, "blocked": 15,
-    "urgent": 10, "immediately": 10, "verify": 10, "kyc": 10,
+    "otp": 30, "pin": 30, "upi": 25, "kyc": 15,
+    "blocked": 15, "urgent": 10, "verify": 10,
+    "http": 20, "https": 20, "link": 15,
+    "offer": 10, "deal": 10, "gift": 15,
+    "prize": 15, "refund": 15, "cashback": 15
 }
 
 FALLBACK_REPLIES = [
-    "Beta my reading glasses are missing, please repeat slowly.",
-    "Which bank are you calling from beta?",
+    "Which department are you calling from?",
     "Can you give your employee ID please?",
-    "I am recording this call, what is your callback number?",
-    "My phone screen is dark, can you repeat?"
+    "What is your official callback number?",
+    "Which branch are you calling from?",
+    "Can you verify your identity first?"
 ]
 
 app = FastAPI(lifespan=lifespan)
@@ -105,36 +108,39 @@ def update_risk_score(text: str, session: Dict):
         if word in text.lower():
             score += weight
     session["risk_score"] = score
-    if score >= 40:
+    if score >= 20:
         session["is_scam"] = True
 
 async def generate_persona_reply(user_input: str, session: Dict) -> str:
     if ai_model is None:
         return random.choice(FALLBACK_REPLIES)
 
-    prompt = f"""
-You are roleplaying as a sweet 68 year old grandmother chatting with a suspicious caller.
+    language = session.get("language", "English")
 
-Scammer message:
+    prompt = f"""
+You are a polite confused Indian grandmother talking to a suspicious caller.
+
+Language: {language}
+
+Caller message:
 {user_input}
 
-Goals:
-• Never share OTP, PIN or bank details
-• Keep scammer talking
-• Ask them to verify identity
-• Sound confused and polite
-• Reply in same language
+Rules:
+• Never share OTP, PIN or personal details
+• Always ask a question to keep the caller talking
+• Ask for ID, callback number, branch or proof
+• Sound polite and confused
 
-Reply in ONE short sentence (max 20 words).
+Reply in ONE sentence and end with a question.
 """
 
     try:
         response = await asyncio.to_thread(ai_model.generate_content, prompt)
         reply = extract_gemini_text(response)
         if not reply or reply in session["reply_history"]:
-            raise Exception("Fallback")
+            raise Exception()
         return reply
-    except Exception:
+    except:
         rotate_key()
         return random.choice(FALLBACK_REPLIES)
 
@@ -156,7 +162,7 @@ def dispatch_final_report(session_id: str, session_data: Dict):
             "engagementDurationSeconds": duration,
             "totalMessagesExchanged": total_msgs
         },
-        "agentNotes": "LLM powered grandmother persona engaging scammer to extract fraud intelligence."
+        "agentNotes": "Adaptive scam bait persona engaging across fraud scenarios."
     }
 
     try:
@@ -176,6 +182,7 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks)
             "reply_history": [],
             "reported": False,
             "risk_score": 0,
+            "language": req.metadata.get("language", "English") if req.metadata else "English",
             "extractedIntelligence": {k: [] for k in INTEL_PATTERNS.keys()},
         }
 
@@ -189,7 +196,7 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks)
     reply = await generate_persona_reply(text, session)
     session["reply_history"].append(reply)
 
-    if session["turns"] >= 10 and not session["reported"]:
+    if session["turns"] >= 5 and not session["reported"]:
         session["reported"] = True
         background_tasks.add_task(dispatch_final_report, sid, session)
         background_tasks.add_task(cleanup_session, sid)
