@@ -9,7 +9,7 @@ from fastapi import FastAPI, BackgroundTasks, Header, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
-import google.genai as genai
+import google.generativeai as genai
 
 _raw_keys = os.environ.get("GEMINI_KEY", "")
 API_KEYS = [k.strip() for k in _raw_keys.split(',') if k.strip()]
@@ -199,3 +199,4 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
