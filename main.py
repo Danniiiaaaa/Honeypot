@@ -8,14 +8,11 @@ from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
 from pydantic import BaseModel
 
-API_KEY = os.getenv("HONEYPOT_API_KEY")
-REPORTING_ENDPOINT = os.getenv("REPORTING_ENDPOINT")
-
-if not API_KEY:
-    raise RuntimeError("Environment variable HONEYPOT_API_KEY is required.")
-
-if not REPORTING_ENDPOINT:
-    raise RuntimeError("Environment variable REPORTING_ENDPOINT is required.")
+API_KEY = os.getenv("HONEYPOT_API_KEY", "abcd1234")
+REPORTING_ENDPOINT = os.getenv(
+    "REPORTING_ENDPOINT",
+    "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
+)
 
 app = FastAPI(title="Elite Honeypot API")
 
@@ -101,7 +98,7 @@ def generate_probe(session: Dict, text: str) -> str:
         probes.append("Can you send confirmation from your official corporate email?")
 
     if not intel["phishingLinks"]:
-        probes.append("What is the official website URL listed on your company homepage?")
+        probes.append("What is the official website URL listed on your homepage?")
 
     if not intel["upiIds"]:
         probes.append("Kindly confirm the full UPI ID along with beneficiary name.")
@@ -134,7 +131,7 @@ def submit_final_report(session_id: str, session: Dict):
         "totalMessagesExchanged": session["turns"] * 2,
         "engagementDurationSeconds": duration,
         "extractedIntelligence": session["extractedIntelligence"],
-        "agentNotes": "Scam detected via behavioral analysis and adaptive probing."
+        "agentNotes": "Scam detected using behavioral red-flag analysis and adaptive probing."
     }
 
     try:
