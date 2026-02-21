@@ -21,12 +21,6 @@ INTEL_PATTERNS = {
     "emailAddresses": r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b"
 }
 
-SCAM_KEYWORDS = [
-    "otp","urgent","blocked","verify","compromised",
-    "winner","cashback","kyc","claim","refund",
-    "payment","account","limited","offer"
-]
-
 class Message(BaseModel):
     sender: str
     text: str
@@ -43,10 +37,26 @@ active_sessions: Dict[str, Dict] = {}
 def clean_text(value: str) -> str:
     return value.strip().rstrip(".,;:!?)]}")
 
-def detect_scam(text: str) -> bool:
-    return any(k in text.lower() for k in SCAM_KEYWORDS)
+def classify_scam(text: str) -> str:
+    lower = text.lower()
+    if any(k in lower for k in ["otp", "account", "blocked", "kyc"]):
+        return "bank"
+    if any(k in lower for k in ["cashback", "reward", "winner"]):
+        return "reward"
+    if any(k in lower for k in ["investment", "profit", "crypto", "returns"]):
+        return "investment"
+    if any(k in lower for k in ["click", "link", "offer"]):
+        return "phishing"
+    return "generic"
 
-def extract_intelligence(text: str, session: Dict):
+def detect_scam(text: str) -> bool:
+    suspicious = [
+        "urgent","verify","blocked","otp","limited",
+        "reward","claim","transfer","refund","payment"
+    ]
+    return any(w in text.lower() for w in suspicious)
+
+def extract_intel(text: str, session: Dict):
     for category, pattern in INTEL_PATTERNS.items():
         matches = re.findall(pattern, text)
         for match in matches:
@@ -54,51 +64,72 @@ def extract_intelligence(text: str, session: Dict):
             if cleaned not in session["extractedIntelligence"][category]:
                 session["extractedIntelligence"][category].append(cleaned)
 
-def adaptive_probe(session: Dict, text: str) -> str:
+def generate_probe(session: Dict, text: str) -> str:
+    scam_type = session["scamType"]
     intel = session["extractedIntelligence"]
     lower = text.lower()
 
-    probes = []
-
     if not intel["phoneNumbers"]:
-        probes.append("Before I proceed, can you confirm your official callback or WhatsApp number?")
+        return "Before I proceed, what is your official callback or WhatsApp number?"
 
-    if not intel["phishingLinks"]:
-        probes.append("I am getting a browser warning. Can you send the exact official website link again?")
+    if not intel["phishingLinks"] and scam_type in ["bank", "phishing", "reward"]:
+        return "Can you send the official website link again so I can verify it?"
 
     if not intel["emailAddresses"]:
-        probes.append("Can you email the instructions from your official company email so I have proof?")
+        return "Can you send the instructions from your official email address?"
 
-    if not intel["upiIds"]:
-        probes.append("My bank app is asking for payee verification. What is the full UPI ID with registered name?")
+    if not intel["upiIds"] and any(k in lower for k in ["payment","transfer","upi"]):
+        return "My bank app is asking for payee verification. What is the full UPI ID with registered name?"
 
-    if not intel["bankAccounts"]:
-        probes.append("Is there a reference or case number I should note for this transaction?")
+    if not intel["bankAccounts"] and any(k in lower for k in ["reference","transaction","case"]):
+        return "Can you share the case or reference number associated with this?"
 
-    context_probes = []
+    context_questions = []
 
     if "otp" in lower:
-        context_probes.append("I just received a code. Should I enter it on the website or reply here?")
+        context_questions.append("I just received a code. Should I enter it on the website or reply here?")
 
-    if "payment" in lower or "upi" in lower:
-        context_probes.append("Before sending money, can you confirm the exact UPI ID and callback number again?")
+    if "payment" in lower:
+        context_questions.append("Before sending money, can you confirm the exact UPI ID and callback number again?")
 
     if "link" in lower:
-        context_probes.append("The page looks slightly different from my bank’s usual site. Can you confirm it is official?")
+        context_questions.append("The website looks slightly different from my bank’s usual domain. Can you confirm it is official?")
 
-    all_options = context_probes + probes
-
-    if not all_options:
-        all_options = [
-            "Should I confirm this with your senior officer as well?",
+    type_specific = {
+        "bank": [
+            "Which branch are you calling from?",
+            "Is there an official case ID I should note?",
+            "Can you confirm your employee ID?"
+        ],
+        "reward": [
+            "Where can I verify this reward officially?",
+            "Is there a support contact for this cashback offer?",
+            "Will I receive confirmation after claiming?"
+        ],
+        "phishing": [
+            "Does this offer appear on your main homepage?",
+            "Is there an official support email listed?",
+            "Can you resend the complete verification link?"
+        ],
+        "investment": [
+            "Is your company registered officially?",
+            "Can you share your office address?",
+            "Is there a regulatory registration number?"
+        ],
+        "generic": [
             "Is there another contact number in case this line disconnects?",
-            "Will I receive an SMS confirmation after this process?"
+            "Should I confirm this with your senior officer?",
+            "Will I receive SMS confirmation after this?"
         ]
+    }
 
-    return random.choice(all_options)
+    options = context_questions + type_specific.get(scam_type, []) + type_specific["generic"]
+
+    return random.choice(options)
 
 def submit_final_report(session_id: str, session: Dict):
     duration = int(time.time() - session["startTime"])
+
     payload = {
         "sessionId": session_id,
         "status": "success",
@@ -109,7 +140,7 @@ def submit_final_report(session_id: str, session: Dict):
             "engagementDurationSeconds": duration,
             "totalMessagesExchanged": session["turns"]
         },
-        "agentNotes": f"Extracted: {session['extractedIntelligence']}"
+        "agentNotes": f"ScamType={session['scamType']} Extracted={session['extractedIntelligence']}"
     }
 
     try:
@@ -131,6 +162,7 @@ async def honeypot(
     if sid not in active_sessions:
         active_sessions[sid] = {
             "is_scam": False,
+            "scamType": classify_scam(req.message.text),
             "turns": 0,
             "startTime": time.time(),
             "reported": False,
@@ -143,9 +175,9 @@ async def honeypot(
     if detect_scam(req.message.text):
         session["is_scam"] = True
 
-    extract_intelligence(req.message.text, session)
+    extract_intel(req.message.text, session)
 
-    reply = adaptive_probe(session, req.message.text)
+    reply = generate_probe(session, req.message.text)
 
     if session["turns"] >= 10 and not session["reported"]:
         session["reported"] = True
