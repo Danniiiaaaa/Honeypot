@@ -38,7 +38,10 @@ def clean(v: str) -> str:
     return v.strip().rstrip(".,;:!?)]}")
 
 def detect_scam(text: str) -> bool:
-    keywords = ["urgent","otp","verify","blocked","reward","transfer","refund","payment","click"]
+    keywords = [
+        "urgent","otp","verify","blocked","reward",
+        "transfer","payment","refund","click","kyc"
+    ]
     return any(k in text.lower() for k in keywords)
 
 def classify_scam(text: str) -> str:
@@ -49,6 +52,8 @@ def classify_scam(text: str) -> str:
         return "upi_fraud"
     if "click" in t or "http" in t:
         return "phishing"
+    if "investment" in t or "crypto" in t:
+        return "investment_scam"
     return "generic"
 
 def extract(text: str, session: Dict):
@@ -64,13 +69,13 @@ def red_flags(text: str):
     flags = []
     if "otp" in t:
         flags.append("Legitimate institutions never request OTP over chat.")
-    if "urgent" in t:
+    if "urgent" in t or "immediately" in t:
         flags.append("Creating urgency is a social engineering tactic.")
-    if "payment" in t:
+    if "payment" in t or "transfer" in t:
         flags.append("Advance payment requests are suspicious.")
-    if "http" in t:
+    if "http" in t or "click" in t:
         flags.append("Unverified links may indicate phishing.")
-    if "reward" in t:
+    if "reward" in t or "cashback" in t:
         flags.append("Unexpected rewards are common scam lures.")
     return flags
 
@@ -88,7 +93,8 @@ def generate_reply(session: Dict, text: str):
         "Please provide the official case or transaction reference number.",
         "What is your employee ID and department?",
         "Can you share your branch address?",
-        "Will I receive written confirmation after verification?"
+        "Will I receive written confirmation after verification?",
+        "Is there a supervisor I can speak to?"
     ]
 
     for q in questions:
@@ -112,7 +118,6 @@ async def honeypot(req: WebhookRequest, x_api_key: str = Header(None)):
     if sid not in sessions:
         sessions[sid] = {
             "start": time.time(),
-            "turns": 0,
             "isScam": False,
             "scamType": classify_scam(req.message.text),
             "flags": set(),
@@ -121,27 +126,34 @@ async def honeypot(req: WebhookRequest, x_api_key: str = Header(None)):
         }
 
     session = sessions[sid]
-    session["turns"] += 1
 
     if detect_scam(req.message.text):
         session["isScam"] = True
 
     extract(req.message.text, session)
 
-    # If conversation reached threshold → return final output
-    if session["turns"] >= 8:
+    history_len = len(req.conversationHistory)
+    intel_fields = sum(1 for v in session["extractedIntelligence"].values() if len(v) > 0)
+    flag_count = len(session["flags"])
+
+    # 🔥 FINAL TRIGGER LOGIC
+    if session["isScam"] and (
+        history_len >= 8 or
+        intel_fields >= 3 or
+        flag_count >= 3
+    ):
         duration = max(240, int(time.time() - session["start"]))
 
         return {
             "status": "success",
             "sessionId": sid,
-            "scamDetected": session["isScam"],
+            "scamDetected": True,
             "scamType": session["scamType"],
             "confidenceLevel": 0.97,
-            "totalMessagesExchanged": session["turns"] * 2,
+            "totalMessagesExchanged": history_len + 1,
             "engagementDurationSeconds": duration,
             "extractedIntelligence": session["extractedIntelligence"],
-            "agentNotes": "Adaptive probing with red flag detection."
+            "agentNotes": "Adaptive probing with multi-layer red flag detection."
         }
 
     reply = generate_reply(session, req.message.text)
