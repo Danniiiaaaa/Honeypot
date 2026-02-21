@@ -1,7 +1,6 @@
 import os
 import re
 import time
-import random
 import requests
 import uvicorn
 from typing import Dict, List, Optional, Any
@@ -14,7 +13,7 @@ REPORTING_ENDPOINT = os.getenv(
     "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 )
 
-app = FastAPI(title="Elite Honeypot API Final")
+app = FastAPI(title="Elite Honeypot API")
 
 INTEL_PATTERNS = {
     "phoneNumbers": r"\+?\d{1,3}[-\s]?\d{7,14}\b",
@@ -186,7 +185,8 @@ async def honeypot(
 
     reply = generate_reply(session, req.message.text)
 
-    if session["turns"] >= 10 and not session["reported"]:
+    # Trigger final report safely at ≥8 turns
+    if not session["reported"] and session["turns"] >= 8:
         session["reported"] = True
         background_tasks.add_task(submit_final, sid, session)
 
