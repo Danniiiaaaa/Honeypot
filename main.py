@@ -16,7 +16,7 @@ INTEL_PATTERNS = {
     "bankAccounts": r"\b\d{12,18}\b",
     "upiIds": r"\b[\w\.-]{2,256}@[a-zA-Z]{2,64}\b",
     "emailAddresses": r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b",
-    "caseIds": r"\b(?:REF|CASE|TICKET)[A-Za-z0-9\-]{4,20}\b",
+    "caseIds": r"\b(?:REF|CASE|TICKET)[A-Za-z0-9\-]{3,20}\b",
     "transactionIds": r"\bTXN[A-Za-z0-9\-]{4,20}\b",
     "orderNumbers": r"\b(?:ORDER|POLICY)[A-Za-z0-9\-]{5,20}\b"
 }
@@ -81,6 +81,7 @@ def red_flags(text: str):
 
 def generate_reply(session: Dict, text: str):
     flags = red_flags(text)
+
     for f in flags:
         if f not in session["flags"]:
             session["flags"].add(f)
@@ -136,7 +137,7 @@ async def honeypot(req: WebhookRequest, x_api_key: str = Header(None)):
     intel_fields = sum(1 for v in session["extractedIntelligence"].values() if len(v) > 0)
     flag_count = len(session["flags"])
 
-    # 🔥 FINAL TRIGGER LOGIC
+    # FINAL TRIGGER
     if session["isScam"] and (
         history_len >= 8 or
         intel_fields >= 3 or
@@ -144,7 +145,7 @@ async def honeypot(req: WebhookRequest, x_api_key: str = Header(None)):
     ):
         duration = max(240, int(time.time() - session["start"]))
 
-        return {
+        final_output = {
             "status": "success",
             "sessionId": sid,
             "scamDetected": True,
@@ -155,6 +156,9 @@ async def honeypot(req: WebhookRequest, x_api_key: str = Header(None)):
             "extractedIntelligence": session["extractedIntelligence"],
             "agentNotes": "Adaptive probing with multi-layer red flag detection."
         }
+
+        
+        return final_output
 
     reply = generate_reply(session, req.message.text)
 
