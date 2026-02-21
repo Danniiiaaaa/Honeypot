@@ -4,18 +4,20 @@ import time
 import random
 import requests
 import uvicorn
+from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
 
 API_KEY = os.getenv("HONEYPOT_API_KEY", "abcd1234")
 REPORTING_ENDPOINT = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 
+app = FastAPI(title="Adaptive Honeypot API")
+
 INTEL_PATTERNS = {
-    "upiIds": r"\b[\w\.-]{2,256}@[a-zA-Z]{2,64}\b",
+    "phoneNumbers": r"\+?\d[\d\-\s]{8,15}\d",
+    "phishingLinks": r"https?://[^\s]+",
     "bankAccounts": r"\b\d{11,18}\b",
-    "phishingLinks": r"(https?://[^\s]+)",
-    "phoneNumbers": r"(\+?\d[\d\-\s]{8,15}\d)",
+    "upiIds": r"\b[\w\.-]{2,256}@[a-zA-Z]{2,64}\b",
     "emailAddresses": r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b"
 }
 
@@ -36,72 +38,66 @@ class WebhookRequest(BaseModel):
     conversationHistory: List[Message] = []
     metadata: Optional[Dict] = None
 
-app = FastAPI()
 active_sessions: Dict[str, Dict] = {}
 
-def clean(item):
-    return item.strip().rstrip(".,;:!?)]}")
+def clean_text(value: str) -> str:
+    return value.strip().rstrip(".,;:!?)]}")
 
-def scan_for_intel(text, session):
-    for cat, pattern in INTEL_PATTERNS.items():
-        found = re.findall(pattern, text)
-        for item in found:
-            item = clean(item)
-            if cat == "upiIds" and "." in item.split("@")[-1]:
-                if item not in session["extractedIntelligence"]["emailAddresses"]:
-                    session["extractedIntelligence"]["emailAddresses"].append(item)
-            if item not in session["extractedIntelligence"][cat]:
-                session["extractedIntelligence"][cat].append(item)
+def detect_scam(text: str) -> bool:
+    return any(k in text.lower() for k in SCAM_KEYWORDS)
 
-def choose_question(session):
+def extract_intelligence(text: str, session: Dict):
+    for category, pattern in INTEL_PATTERNS.items():
+        matches = re.findall(pattern, text)
+        for match in matches:
+            cleaned = clean_text(match)
+            if cleaned not in session["extractedIntelligence"][category]:
+                session["extractedIntelligence"][category].append(cleaned)
+
+def adaptive_probe(session: Dict, text: str) -> str:
     intel = session["extractedIntelligence"]
-    turn = session["turns"]
-
-    questions = []
-
-    if not intel["phoneNumbers"]:
-        questions.append("Before I proceed, can you confirm your official callback or WhatsApp number so I can note it down?")
-
-    if not intel["phishingLinks"]:
-        questions.append("I’m seeing a warning on my screen. Can you send the exact official verification link again?")
-
-    if not intel["emailAddresses"]:
-        questions.append("Can you email me the instructions from your official email so I have written proof?")
-
-    if not intel["upiIds"]:
-        questions.append("My bank app is asking for payee confirmation. What is the full UPI ID with registered name?")
-
-    if not intel["bankAccounts"]:
-        questions.append("For verification, what is the transaction or reference number associated with this case?")
-
-    fallback = [
-        "Should I also confirm this with your senior officer before proceeding?",
-        "Is there another contact number in case this line disconnects?",
-        "Can you repeat the website link once more slowly?",
-        "Do I need to enter the OTP on your website or reply here?",
-        "Will I receive an SMS confirmation after this?"
-    ]
-
-    if questions:
-        return random.choice(questions)
-
-    return random.choice(fallback)
-
-def generate_persona_reply(session, text):
     lower = text.lower()
 
-    if any(k in lower for k in ["otp", "code"]):
-        return "I just received something on my phone. Where exactly should I enter it?"
+    probes = []
 
-    if any(k in lower for k in ["payment","upi","transfer"]):
-        return "Before I send anything, can you confirm the exact UPI ID and callback number again?"
+    if not intel["phoneNumbers"]:
+        probes.append("Before I proceed, can you confirm your official callback or WhatsApp number?")
 
-    if any(k in lower for k in ["link","website","portal"]):
-        return "The page looks slightly different from my bank’s site. Can you confirm this is official?"
+    if not intel["phishingLinks"]:
+        probes.append("I am getting a browser warning. Can you send the exact official website link again?")
 
-    return choose_question(session)
+    if not intel["emailAddresses"]:
+        probes.append("Can you email the instructions from your official company email so I have proof?")
 
-def dispatch_final_report(session_id, session):
+    if not intel["upiIds"]:
+        probes.append("My bank app is asking for payee verification. What is the full UPI ID with registered name?")
+
+    if not intel["bankAccounts"]:
+        probes.append("Is there a reference or case number I should note for this transaction?")
+
+    context_probes = []
+
+    if "otp" in lower:
+        context_probes.append("I just received a code. Should I enter it on the website or reply here?")
+
+    if "payment" in lower or "upi" in lower:
+        context_probes.append("Before sending money, can you confirm the exact UPI ID and callback number again?")
+
+    if "link" in lower:
+        context_probes.append("The page looks slightly different from my bank’s usual site. Can you confirm it is official?")
+
+    all_options = context_probes + probes
+
+    if not all_options:
+        all_options = [
+            "Should I confirm this with your senior officer as well?",
+            "Is there another contact number in case this line disconnects?",
+            "Will I receive an SMS confirmation after this process?"
+        ]
+
+    return random.choice(all_options)
+
+def submit_final_report(session_id: str, session: Dict):
     duration = int(time.time() - session["startTime"])
     payload = {
         "sessionId": session_id,
@@ -113,25 +109,30 @@ def dispatch_final_report(session_id, session):
             "engagementDurationSeconds": duration,
             "totalMessagesExchanged": session["turns"]
         },
-        "agentNotes": str(session["extractedIntelligence"])
+        "agentNotes": f"Extracted: {session['extractedIntelligence']}"
     }
+
     try:
         requests.post(REPORTING_ENDPOINT, json=payload, timeout=5)
-    except:
+    except Exception:
         pass
 
-@app.post("/honeypot")
-async def honeypot(req: WebhookRequest, background_tasks: BackgroundTasks, x_api_key: str = Header(None)):
+@app.post("/api/honeypot")
+async def honeypot(
+    req: WebhookRequest,
+    background_tasks: BackgroundTasks,
+    x_api_key: str = Header(None)
+):
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     sid = req.sessionId
+
     if sid not in active_sessions:
         active_sessions[sid] = {
             "is_scam": False,
             "turns": 0,
             "startTime": time.time(),
-            "reply_history": [],
             "reported": False,
             "extractedIntelligence": {k: [] for k in INTEL_PATTERNS.keys()}
         }
@@ -139,17 +140,16 @@ async def honeypot(req: WebhookRequest, background_tasks: BackgroundTasks, x_api
     session = active_sessions[sid]
     session["turns"] += 1
 
-    if any(k in req.message.text.lower() for k in SCAM_KEYWORDS):
+    if detect_scam(req.message.text):
         session["is_scam"] = True
 
-    scan_for_intel(req.message.text, session)
+    extract_intelligence(req.message.text, session)
 
-    reply = generate_persona_reply(session, req.message.text)
-    session["reply_history"].append(reply)
+    reply = adaptive_probe(session, req.message.text)
 
     if session["turns"] >= 10 and not session["reported"]:
         session["reported"] = True
-        background_tasks.add_task(dispatch_final_report, sid, session)
+        background_tasks.add_task(submit_final_report, sid, session)
 
     return {"status": "success", "reply": reply}
 
