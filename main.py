@@ -1,17 +1,12 @@
 import os
 import re
 import time
-import requests
 import uvicorn
 from typing import Dict, List, Optional, Any
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 
 API_KEY = os.getenv("API_ACCESS_TOKEN")
-REPORTING_ENDPOINT = os.getenv(
-    "REPORTING_ENDPOINT",
-    "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
-)
 
 app = FastAPI(title="Elite Honeypot API")
 
@@ -37,125 +32,76 @@ class WebhookRequest(BaseModel):
     conversationHistory: List[Message] = []
     metadata: Optional[Dict] = None
 
-active_sessions: Dict[str, Dict] = {}
+sessions: Dict[str, Dict] = {}
 
-def clean(value: str) -> str:
-    return value.strip().rstrip(".,;:!?)]}")
+def clean(v: str) -> str:
+    return v.strip().rstrip(".,;:!?)]}")
 
 def detect_scam(text: str) -> bool:
-    keywords = [
-        "urgent","otp","verify","blocked","reward",
-        "claim","transfer","refund","payment","kyc","click"
-    ]
+    keywords = ["urgent","otp","verify","blocked","reward","transfer","refund","payment","click"]
     return any(k in text.lower() for k in keywords)
 
 def classify_scam(text: str) -> str:
     t = text.lower()
     if "otp" in t or "account" in t:
         return "bank_fraud"
-    if "cashback" in t or "reward" in t:
+    if "reward" in t or "cashback" in t:
         return "upi_fraud"
-    if "investment" in t or "crypto" in t:
-        return "investment_scam"
     if "click" in t or "http" in t:
         return "phishing"
     return "generic"
 
-def extract_intel(text: str, session: Dict):
+def extract(text: str, session: Dict):
     for key, pattern in INTEL_PATTERNS.items():
         matches = re.findall(pattern, text)
-        for match in matches:
-            val = clean(match)
+        for m in matches:
+            val = clean(m)
             if val not in session["extractedIntelligence"][key]:
                 session["extractedIntelligence"][key].append(val)
 
-def red_flags(text: str) -> List[str]:
+def red_flags(text: str):
     t = text.lower()
     flags = []
     if "otp" in t:
         flags.append("Legitimate institutions never request OTP over chat.")
-    if "urgent" in t or "immediately" in t:
-        flags.append("Creating urgency is a known social engineering tactic.")
-    if "transfer" in t or "payment" in t:
+    if "urgent" in t:
+        flags.append("Creating urgency is a social engineering tactic.")
+    if "payment" in t:
         flags.append("Advance payment requests are suspicious.")
-    if "http" in t or "click" in t:
+    if "http" in t:
         flags.append("Unverified links may indicate phishing.")
-    if "reward" in t or "cashback" in t:
+    if "reward" in t:
         flags.append("Unexpected rewards are common scam lures.")
     return flags
 
-def generate_reply(session: Dict, text: str) -> str:
-    intel = session["extractedIntelligence"]
+def generate_reply(session: Dict, text: str):
     flags = red_flags(text)
-
-    reply_parts = []
-
     for f in flags:
-        if f not in session["flagged"]:
-            session["flagged"].add(f)
-            reply_parts.append(f)
-            break
+        if f not in session["flags"]:
+            session["flags"].add(f)
+            return f
 
-    probe_priority = [
-        ("phoneNumbers", "Please provide your official callback number."),
-        ("emailAddresses", "Can you send confirmation from your official corporate email?"),
-        ("phishingLinks", "What is the official website URL listed publicly?"),
-        ("upiIds", "Kindly confirm the full UPI ID along with beneficiary name."),
-        ("bankAccounts", "Please provide the official case or transaction reference number.")
-    ]
-
-    for key, question in probe_priority:
-        if not intel[key] and question not in session["asked"]:
-            session["asked"].add(question)
-            reply_parts.append(question)
-            break
-
-    extra_questions = [
+    questions = [
+        "Please provide your official callback number.",
+        "Can you send confirmation from your official corporate email?",
+        "What is the official website URL listed publicly?",
+        "Please provide the official case or transaction reference number.",
         "What is your employee ID and department?",
         "Can you share your branch address?",
-        "Is this documented officially on your website?",
-        "Will I receive written confirmation after verification?",
-        "Can your supervisor confirm this request?",
-        "Is there a ticket or case ID I can reference?"
+        "Will I receive written confirmation after verification?"
     ]
 
-    for q in extra_questions:
+    for q in questions:
         if q not in session["asked"]:
             session["asked"].add(q)
-            reply_parts.append(q)
-            break
+            return q
 
-    return " ".join(reply_parts)
-
-def submit_final(session_id: str, session: Dict):
-    duration = max(240, int(time.time() - session["start"]))
-
-    payload = {
-        "sessionId": session_id,
-        "scamDetected": session["isScam"],
-        "scamType": session["scamType"],
-        "confidenceLevel": 0.97,
-        "totalMessagesExchanged": session["turns"] * 2,
-        "engagementDurationSeconds": duration,
-        "extractedIntelligence": session["extractedIntelligence"],
-        "agentNotes": "Adaptive probing with multi-layer red flag detection."
-    }
-
-    try:
-        requests.post(REPORTING_ENDPOINT, json=payload, timeout=5)
-    except Exception:
-        pass
+    return questions[0]
 
 @app.post("/api/honeypot")
-async def honeypot(
-    req: WebhookRequest,
-    background_tasks: BackgroundTasks,
-    x_api_key: str = Header(None)
-):
-    if not API_KEY:
-        raise HTTPException(status_code=500, detail="API key not configured")
+async def honeypot(req: WebhookRequest, x_api_key: str = Header(None)):
 
-    if x_api_key != API_KEY:
+    if API_KEY and x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     if req.message.sender != "scammer":
@@ -163,32 +109,42 @@ async def honeypot(
 
     sid = req.sessionId
 
-    if sid not in active_sessions:
-        active_sessions[sid] = {
+    if sid not in sessions:
+        sessions[sid] = {
+            "start": time.time(),
+            "turns": 0,
             "isScam": False,
             "scamType": classify_scam(req.message.text),
-            "turns": 0,
-            "start": time.time(),
-            "reported": False,
+            "flags": set(),
             "asked": set(),
-            "flagged": set(),
             "extractedIntelligence": {k: [] for k in INTEL_PATTERNS}
         }
 
-    session = active_sessions[sid]
+    session = sessions[sid]
     session["turns"] += 1
 
     if detect_scam(req.message.text):
         session["isScam"] = True
 
-    extract_intel(req.message.text, session)
+    extract(req.message.text, session)
+
+    # If conversation reached threshold → return final output
+    if session["turns"] >= 8:
+        duration = max(240, int(time.time() - session["start"]))
+
+        return {
+            "status": "success",
+            "sessionId": sid,
+            "scamDetected": session["isScam"],
+            "scamType": session["scamType"],
+            "confidenceLevel": 0.97,
+            "totalMessagesExchanged": session["turns"] * 2,
+            "engagementDurationSeconds": duration,
+            "extractedIntelligence": session["extractedIntelligence"],
+            "agentNotes": "Adaptive probing with red flag detection."
+        }
 
     reply = generate_reply(session, req.message.text)
-
-    # Trigger final report safely at ≥8 turns
-    if not session["reported"] and session["turns"] >= 8:
-        session["reported"] = True
-        background_tasks.add_task(submit_final, sid, session)
 
     return {
         "status": "success",
