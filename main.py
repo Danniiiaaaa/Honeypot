@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Header, BackgroundTasks
 from pydantic import BaseModel
 
 API_KEY = os.getenv("API_ACCESS_TOKEN")
-GEMINI_KEYS = os.getenv("GEMINI_KEYS", "")
+GEMINI_KEYS = os.getenv("GEMINI_KEY", "")
 REPORTING_ENDPOINT = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 
 if not GEMINI_KEYS:
@@ -171,3 +171,4 @@ async def honeypot(req: WebhookRequest, background_tasks: BackgroundTasks, x_api
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
