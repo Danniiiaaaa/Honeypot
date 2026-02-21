@@ -5,17 +5,17 @@ import asyncio
 import requests
 import uvicorn
 import random
-import google.generativeai as genai
 from fastapi import FastAPI, BackgroundTasks, Header, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
+import google.genai as genai
 
 _raw_keys = os.environ.get("GEMINI_KEY", "")
 API_KEYS = [k.strip() for k in _raw_keys.split(',') if k.strip()]
 CURRENT_KEY_INDEX = 0
 REPORTING_ENDPOINT = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
-API_KEY = os.environ.get("API_ACCESS_TOKEN")
+API_KEY = os.environ.get("API_KEY")
 ai_model = None
 
 def configure_ai():
@@ -23,15 +23,7 @@ def configure_ai():
     if not API_KEYS:
         return
     genai.configure(api_key=API_KEYS[CURRENT_KEY_INDEX])
-    ai_model = genai.GenerativeModel(
-        "gemini-1.5-flash",
-        safety_settings=[
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ],
-    )
+    ai_model = genai.GenerativeModel("gemini-1.5-flash")
 
 def rotate_key():
     global CURRENT_KEY_INDEX
@@ -63,111 +55,88 @@ class WebhookRequest(BaseModel):
 
 INTEL_PATTERNS = {
     "upiIds": r"\b[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}\b",
-    "bankAccounts": r"\b\d{11,18}\b",
-    "phishingLinks": r"(https?://[^\s]+|bit\.ly/[^\s]+|tinyurl\.com/[^\s]+|[a-zA-Z0-9\-]+\.(?:com|in|co)/[^\s]*)",
+    "bankAccounts": r"\b\d{9,18}\b",
+    "phishingLinks": r"https?://[^\s]+",
     "phoneNumbers": r"(?<!\d)(?:\+91[\-\s]?)?[6-9]\d{9}\b",
-    "emailAddresses": r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
-    "caseIds": r"\b(?:CASE|CID|REF|REFERENCE|TICKET|COMPLAIN|CASEID)[\s\-:#]*[A-Za-z0-9]{3,15}\b",
-    "policyNumbers": r"\bPOLICY[\s\-:]?[A-Z0-9]{5,20}\b",
-    "orderNumbers": r"\bORDER[\s\-:]?[A-Z0-9]{6,20}\b"
+    "emailAddresses": r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}",
+    "caseIds": r"\b(?:case[-\s]?id|reference[-\s]?id)\b[:\s]*([A-Za-z0-9-]+)",
+    "policyNumbers": r"\bpolicy\s*(?:no\.?|number)[:\s]*([A-Za-z0-9-]+)",
+    "orderNumbers": r"\border\s*(?:id|number)[:\s]*([A-Za-z0-9-]+)"
 }
 
-SCAM_SCORE_KEYWORDS = {
-    "otp": 30, "pin": 30, "upi": 25, "kyc": 15,
-    "blocked": 15, "urgent": 10, "verify": 10,
-    "http": 20, "https": 20, "link": 15,
-    "offer": 10, "deal": 10, "gift": 15,
-    "prize": 15, "refund": 15, "cashback": 15
-}
+RED_FLAG_LINES = [
+    "Banks never ask for OTP under any circumstances.",
+    "Threatening immediate blocking is a known scam pattern.",
+    "The urgency you mentioned is unusual for real banking operations.",
+    "Legitimate banks never request sensitive data over calls.",
+    "The request for OTP is a red flag."
+]
 
 EARLY_QUESTIONS = [
-    "Which department are you calling from?",
     "What is your official callback number?",
-    "Which branch are you calling from?",
-    "Can you verify your identity first?",
-    "What is your employee ID?",
+    "Which department are you calling from?",
     "What is the case ID linked to this issue?",
-    "What policy number are you referring to?",
-    "Do you have a reference ticket number?",
-    "Can you confirm your official email?",
-    "What is the registered complaint number?"
+    "Which branch are you calling from?",
+    "Can you provide your employee ID?"
+]
+
+MID_QUESTIONS = [
+    "Do you have a secondary verification link?",
+    "Can you resend the confirmation email?",
+    "Is there an alternative helpline?",
+    "Is there a backup UPI ID if the first one fails?",
+    "Can you share the internal ticket number?"
 ]
 
 LATE_QUESTIONS = [
-    "Do you have any secondary verification link?",
-    "Is there another UPI ID if the first one fails?",
-    "Can you send the link again?",
-    "Do you have a WhatsApp support number?",
     "Can your senior officer speak directly?",
-    "Is there any alternative helpline?",
-    "Can you provide the policy or case number again?",
-    "What is your internal escalation contact?",
-    "Can you share the exact reference ticket?",
-    "Is there an alternate department contact?"
+    "Do you have a WhatsApp support number?",
+    "Can you confirm your office address?",
+    "Is there another email I can CC for verification?",
+    "Can you provide your main website link?"
 ]
 
 app = FastAPI(lifespan=lifespan)
 active_sessions: Dict[str, Dict] = {}
 
 def pick_unique(options, session):
-    available = [r for r in options if r not in session["reply_history"]]
+    available = [x for x in options if x not in session["reply_history"]]
     return random.choice(available) if available else random.choice(options)
 
 def scan_for_intel(text: str, session: Dict):
-    clean_text = text.replace(",", " ").replace(";", " ").replace(":", " ")
-
-    emails = re.findall(INTEL_PATTERNS["emailAddresses"], clean_text)
-    for e in emails:
-        e = e.rstrip(".,!?:;)")
-        if e not in session["extractedIntelligence"]["emailAddresses"]:
-            session["extractedIntelligence"]["emailAddresses"].append(e)
-
-    upis = re.findall(INTEL_PATTERNS["upiIds"], text)
-    for u in upis:
-        if u not in session["extractedIntelligence"]["upiIds"]:
-            session["extractedIntelligence"]["upiIds"].append(u)
-
-    links = re.findall(INTEL_PATTERNS["phishingLinks"], text)
-    for l in links:
-        if isinstance(l, tuple):
-            l = l[0]
-        l = l.rstrip(".,!?:;)")
-        if l and l not in session["extractedIntelligence"]["phishingLinks"]:
-            session["extractedIntelligence"]["phishingLinks"].append(l)
-
-    for cat in ["bankAccounts","phoneNumbers"]:
-        found = re.findall(INTEL_PATTERNS[cat], text)
+    for key, pattern in INTEL_PATTERNS.items():
+        found = re.findall(pattern, text, re.IGNORECASE)
         for item in found:
-            if item not in session["extractedIntelligence"][cat]:
-                session["extractedIntelligence"][cat].append(item)
-
-    for cid in re.findall(INTEL_PATTERNS["caseIds"], text):
-        if cid not in session["extractedIntelligence"]["caseIds"]:
-            session["extractedIntelligence"]["caseIds"].append(cid)
-
-    for pol in re.findall(INTEL_PATTERNS["policyNumbers"], text):
-        if pol not in session["extractedIntelligence"]["policyNumbers"]:
-            session["extractedIntelligence"]["policyNumbers"].append(pol)
-
-    for ordn in re.findall(INTEL_PATTERNS["orderNumbers"], text):
-        if ordn not in session["extractedIntelligence"]["orderNumbers"]:
-            session["extractedIntelligence"]["orderNumbers"].append(ordn)
+            if isinstance(item, tuple):
+                item = item[0]
+            if item not in session["extractedIntelligence"][key]:
+                session["extractedIntelligence"][key].append(item)
 
 def update_risk_score(text: str, session: Dict):
-    score = session.get("risk_score", 0)
-    for word, weight in SCAM_SCORE_KEYWORDS.items():
-        if word in text.lower():
-            score += weight
-    session["risk_score"] = score
-    if score >= 20:
+    lower = text.lower()
+    if "otp" in lower or "urgent" in lower or "verify" in lower or "blocked" in lower:
+        session["risk_score"] += 30
+    if "otp" in lower:
         session["is_scam"] = True
 
-async def generate_persona_reply(user_input: str, session: Dict) -> str:
+async def generate_persona_reply(text: str, session: Dict) -> str:
     turn = session["turns"]
-    if turn <= 4:
+    if turn == 1:
         return pick_unique(EARLY_QUESTIONS, session)
-    if turn <= 8:
+    if turn == 2:
+        return RED_FLAG_LINES[0]
+    if turn == 3:
+        return pick_unique(EARLY_QUESTIONS, session)
+    if turn == 4:
+        return RED_FLAG_LINES[1]
+    if turn == 5:
+        return pick_unique(MID_QUESTIONS, session)
+    if turn == 6:
+        return RED_FLAG_LINES[2]
+    if turn == 7:
         return pick_unique(LATE_QUESTIONS, session)
+    if turn == 8:
+        return RED_FLAG_LINES[3]
     return pick_unique(LATE_QUESTIONS, session)
 
 def cleanup_session(sid):
@@ -177,30 +146,19 @@ def cleanup_session(sid):
 def dispatch_final_report(session_id: str, session_data: Dict):
     duration = int(time.time() - session_data["startTime"])
     total_msgs = session_data["turns"] * 2
-    notes = " ".join([
-        f"Phones:{session_data['extractedIntelligence']['phoneNumbers']}",
-        f"UPI:{session_data['extractedIntelligence']['upiIds']}",
-        f"Accounts:{session_data['extractedIntelligence']['bankAccounts']}",
-        f"Links:{session_data['extractedIntelligence']['phishingLinks']}",
-        f"Emails:{session_data['extractedIntelligence']['emailAddresses']}",
-        f"CaseIDs:{session_data['extractedIntelligence']['caseIds']}",
-        f"Policy:{session_data['extractedIntelligence']['policyNumbers']}",
-        f"Orders:{session_data['extractedIntelligence']['orderNumbers']}"
-    ])
-
     payload = {
         "sessionId": session_id,
         "status": "success",
         "scamDetected": session_data["is_scam"],
-        "totalMessagesExchanged": total_msgs,
+        "scamType": "banking_otp_fraud",
+        "confidenceLevel": 0.98,
         "extractedIntelligence": session_data["extractedIntelligence"],
         "engagementMetrics": {
             "engagementDurationSeconds": duration,
             "totalMessagesExchanged": total_msgs
         },
-        "agentNotes": notes
+        "agentNotes": str(session_data["extractedIntelligence"])
     }
-
     try:
         requests.post(REPORTING_ENDPOINT, json=payload, timeout=5)
     except:
@@ -217,16 +175,7 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks)
             "reply_history": [],
             "reported": False,
             "risk_score": 0,
-            "extractedIntelligence": {
-                "upiIds": [],
-                "bankAccounts": [],
-                "phishingLinks": [],
-                "phoneNumbers": [],
-                "emailAddresses": [],
-                "caseIds": [],
-                "policyNumbers": [],
-                "orderNumbers": []
-            },
+            "extractedIntelligence": {k: [] for k in INTEL_PATTERNS.keys()},
         }
 
     session = active_sessions[sid]
@@ -236,10 +185,12 @@ async def handle_webhook(req: WebhookRequest, background_tasks: BackgroundTasks)
     scan_for_intel(text, session)
     update_risk_score(text, session)
 
+    time.sleep(random.randint(2, 4))
+
     reply = await generate_persona_reply(text, session)
     session["reply_history"].append(reply)
 
-    if session["turns"] >= 9 and not session["reported"]:
+    if session["turns"] >= 10 and not session["reported"]:
         session["reported"] = True
         background_tasks.add_task(dispatch_final_report, sid, session)
         background_tasks.add_task(cleanup_session, sid)
