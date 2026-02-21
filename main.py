@@ -134,18 +134,13 @@ async def honeypot(req: WebhookRequest, x_api_key: str = Header(None)):
     extract(req.message.text, session)
 
     history_len = len(req.conversationHistory)
-    intel_fields = sum(1 for v in session["extractedIntelligence"].values() if len(v) > 0)
-    flag_count = len(session["flags"])
 
-    # FINAL TRIGGER
-    if session["isScam"] and (
-        history_len >= 8 or
-        intel_fields >= 3 or
-        flag_count >= 3
-    ):
+    # 🔥 EARLY SAFE FINAL TRIGGER
+    if session["isScam"] and history_len >= 6:
+
         duration = max(240, int(time.time() - session["start"]))
 
-        final_output = {
+        return {
             "status": "success",
             "sessionId": sid,
             "scamDetected": True,
@@ -156,9 +151,6 @@ async def honeypot(req: WebhookRequest, x_api_key: str = Header(None)):
             "extractedIntelligence": session["extractedIntelligence"],
             "agentNotes": "Adaptive probing with multi-layer red flag detection."
         }
-
-        
-        return final_output
 
     reply = generate_reply(session, req.message.text)
 
