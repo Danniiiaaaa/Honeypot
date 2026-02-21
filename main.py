@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
 from pydantic import BaseModel
 
-API_KEY = os.getenv("HONEYPOT_API_KEY", "abcd1234")
+API_KEY = os.getenv("API_ACCESS_TOKEN")
 REPORTING_ENDPOINT = os.getenv(
     "REPORTING_ENDPOINT",
     "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
@@ -46,7 +46,8 @@ def clean(value: str) -> str:
 def detect_scam(text: str) -> bool:
     keywords = [
         "urgent","verify","blocked","otp","limited",
-        "reward","claim","transfer","refund","payment","kyc","click"
+        "reward","claim","transfer","refund","payment",
+        "kyc","click","confirm","account"
     ]
     return any(k in text.lower() for k in keywords)
 
@@ -86,6 +87,7 @@ def identify_red_flags(text: str) -> List[str]:
 def generate_probe(session: Dict, text: str) -> str:
     intel = session["extractedIntelligence"]
     flags = identify_red_flags(text)
+
     probes = []
 
     if flags:
@@ -95,7 +97,7 @@ def generate_probe(session: Dict, text: str) -> str:
         probes.append("Please provide your official callback number.")
 
     if not intel["emailAddresses"]:
-        probes.append("Can you send confirmation from your official corporate email?")
+        probes.append("Can you send confirmation from your official corporate email address?")
 
     if not intel["phishingLinks"]:
         probes.append("What is the official website URL listed on your homepage?")
@@ -110,7 +112,8 @@ def generate_probe(session: Dict, text: str) -> str:
         "What is your employee ID and department?",
         "Can you share your branch address?",
         "Is this process documented on your official website?",
-        "Will I receive written confirmation after verification?"
+        "Will I receive written confirmation after verification?",
+        "Can your supervisor confirm this request?"
     ])
 
     for probe in probes:
@@ -131,7 +134,7 @@ def submit_final_report(session_id: str, session: Dict):
         "totalMessagesExchanged": session["turns"] * 2,
         "engagementDurationSeconds": duration,
         "extractedIntelligence": session["extractedIntelligence"],
-        "agentNotes": "Scam detected using behavioral red-flag analysis and adaptive probing."
+        "agentNotes": "Scam detected via behavioral red-flag analysis and adaptive probing."
     }
 
     try:
@@ -145,6 +148,9 @@ async def honeypot(
     background_tasks: BackgroundTasks,
     x_api_key: str = Header(None)
 ):
+    if not API_KEY:
+        raise HTTPException(status_code=500, detail="API key not configured")
+
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
@@ -178,7 +184,10 @@ async def honeypot(
         session["reported"] = True
         background_tasks.add_task(submit_final_report, sid, session)
 
-    return {"status": "success", "reply": reply}
+    return {
+        "status": "success",
+        "reply": reply
+    }
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
